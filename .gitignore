@@ -1,0 +1,15 @@
+node_modules
+dist
+.env
+*.log
+coverage
+uploads
+.DS_Store
+*.local
+*firebase-adminsdk*.json
+*.apk
+*.jks
+*.keystore
+client/dist
+server/dist
+server/uploads

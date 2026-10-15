@@ -1,0 +1,16 @@
+{
+  "name": "gyroz-studio",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Gyroz Studio — creative operations platform for production, publishing, billing, and people.",
+  "scripts": {
+    "dev": "concurrently -n server,web -c gray,yellow \"npm --prefix server run dev\" \"npm --prefix client run dev\"",
+    "build": "npm --prefix server run build && npm --prefix client run build",
+    "test": "npm --prefix server test",
+    "seed": "npm --prefix server run seed",
+    "start": "npm --prefix server start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.5"
+  }
+}
