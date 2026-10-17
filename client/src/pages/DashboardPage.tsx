@@ -2,8 +2,9 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
+import { hasFullAccess, useAuth } from "@/lib/auth";
 import { inr, monthRange } from "@/lib/format";
+import { ShiftDay } from "@/components/ShiftDay";
 import { Empty, LoadingRows, PageHeader, Status, Timeline } from "@/components/ui";
 
 type Dashboard = {
@@ -37,6 +38,7 @@ export function DashboardPage() {
           <input className="control w-36 min-w-0 flex-1 sm:flex-none" type="date" value={to} onChange={(event) => setTo(event.target.value)} aria-label="To" />
         </div>
       } />
+      <ShiftDay />
       {query.isLoading ? <LoadingRows /> : null}
       {query.isError ? <Empty title="Dashboard unavailable" text="The studio figures could not be loaded." /> : null}
       <ProgressTracker from={from} to={to} zone={zone} />
@@ -315,9 +317,9 @@ function WorkDesk({ dashboard }: { dashboard: Dashboard }) {
   const review = can("editing.review");
   const claimOnly = can("editing.claim") && !review;
   const publish = can("publishing.publish");
-  const approveInvoices = user?.role.systemKey === "super_admin";
+  const approveInvoices = hasFullAccess(user?.role.systemKey);
   const createInvoices = can("invoices.create");
-  const expenseQueue = user?.role.systemKey === "super_admin" ? "admin_approved" : user?.role.systemKey === "admin" ? "pending" : "";
+  const expenseQueue = user?.role.systemKey === "super_admin" ? "admin_approved" : user?.role.systemKey === "admin" ? "both" : "";
   const manageTime = can("attendance.manage");
   const ownTime = can("attendance.self") && !manageTime;
   const approveReshoots = can("reshoots.approve");
@@ -351,7 +353,7 @@ function WorkDesk({ dashboard }: { dashboard: Dashboard }) {
   const expenses = useQuery({
     queryKey: ["desk", "expenses", expenseQueue],
     enabled: Boolean(expenseQueue),
-    queryFn: async () => (await api.get("/expenses", { params: { status: expenseQueue } })).data.data as Array<{ _id: string; description: string; category: string; dateKey: string; amountPaise: number; status: string }>,
+    queryFn: async () => (await api.get("/expenses", { params: expenseQueue === "both" ? {} : { status: expenseQueue } })).data.data as Array<{ _id: string; description: string; category: string; dateKey: string; amountPaise: number; status: string }>,
   });
   const leave = useQuery({
     queryKey: ["desk", "leave"],
@@ -467,13 +469,13 @@ function WorkDesk({ dashboard }: { dashboard: Dashboard }) {
       href: "/invoices",
       action: "Invoice",
     })) : []),
-    ...(expenseQueue ? (expenses.data ?? []).filter((item) => item.status === expenseQueue).slice(0, 8).map((item) => ({
+    ...(expenseQueue ? (expenses.data ?? []).filter((item) => expenseQueue === "both" ? item.status === "pending" || item.status === "admin_approved" : item.status === expenseQueue).slice(0, 8).map((item) => ({
       id: item._id,
       title: item.description,
       detail: `${item.dateKey} · ${item.category} · ${inr(item.amountPaise)}`,
       status: item.status,
       href: "/expenses",
-      action: expenseQueue === "admin_approved" ? "Decide" : "Approve",
+      action: item.status === "admin_approved" ? "Decide" : "Approve",
     })) : []),
     ...((leave.data ?? []).filter((item) => item.status === "pending").slice(0, 8).map((item) => ({
       id: item._id,

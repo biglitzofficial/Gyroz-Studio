@@ -5,6 +5,7 @@ import { RouterProvider } from "react-router-dom";
 import { FeedbackLayer } from "@/components/feedback";
 import { AuthProvider } from "@/lib/auth";
 import { mutationCache } from "@/lib/feedback";
+import { LiveUpdates } from "@/lib/live";
 import { router } from "@/router";
 import "./index.css";
 
@@ -17,6 +18,7 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
+        <LiveUpdates />
         <RouterProvider router={router} />
         <FeedbackLayer />
       </AuthProvider>

@@ -2,13 +2,14 @@ import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, errorMessage } from "@/lib/api";
+import { openPrintable } from "@/lib/print";
 import { inr, monthRange, paiseToRupees, rupeesToPaise } from "@/lib/format";
-import { useAuth } from "@/lib/auth";
+import { hasFullAccess, useAuth } from "@/lib/auth";
 import { Button, Empty, Field, LoadingRows, Notice, PageHeader, SaveAction, Select, Status, TextInput } from "@/components/ui";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 type Line = { description: string; quantity: number; unitPricePaise: number; discountPaise: number; sourceType?: string; sourceId?: string };
-type InvoiceRow = { _id: string; invoiceNumber: string; status: string; displayStatus: string; projectId?: string; clientId?: string; totalPaise: number; paidPaise: number; outstandingPaise: number };
+type InvoiceRow = { _id: string; invoiceNumber: string; status: string; displayStatus: string; projectId?: string; clientId?: string; totalPaise: number; paidPaise: number; outstandingPaise: number; lineItems?: Array<{ sourceType?: string; sourceId?: string }> };
 type ReadyCut = { _id: string; deliverableCode: string; title: string; projectId?: string; clientId?: string };
 
 export function InvoicesPage() {
@@ -52,6 +53,9 @@ export function InvoicesPage() {
     mutationFn: async (items: ReadyCut[]) => {
       const first = items[0];
       if (!first?.clientId) throw new Error("This published video has no client.");
+      const current = queryClient.getQueryData<InvoiceRow[]>(["invoices"]) ?? [];
+      const already = current.find((invoice) => invoice.status !== "void" && items.every((item) => (invoice.lineItems ?? []).some((line) => String(line.sourceId) === String(item._id))));
+      if (already) return { data: { data: { invoice: { _id: already._id } } } };
       return api.post("/invoices", {
         clientId: String(first.clientId),
         projectId: first.projectId ? String(first.projectId) : undefined,
@@ -86,9 +90,11 @@ export function InvoicesPage() {
   const projectById = new Map((projects.data ?? []).map((project) => [project._id, project]));
   const clientById = new Map((clients.data ?? []).map((client) => [String(client.id || client._id), client.name]));
   const drafts = visible.filter((invoice) => invoice.status === "draft");
+  const billedSourceIds = new Set(visible.filter((invoice) => invoice.status !== "draft").flatMap((invoice) => (invoice.lineItems ?? []).map((line) => String(line.sourceId || ""))).filter(Boolean));
   const billedProjects = new Set(visible.filter((invoice) => ["approved", "issued", "partially_paid", "paid"].includes(invoice.status)).map((invoice) => String(invoice.projectId || "")));
   const groups = new Map<string, ReadyCut[]>();
   for (const item of (ready.data ?? []).filter((item) => {
+    if (billedSourceIds.has(String(item._id))) return false;
     const projectId = String(item.projectId || "");
     const hasDraft = drafts.some((invoice) => String(invoice.projectId) === projectId);
     return hasDraft || !billedProjects.has(projectId);
@@ -102,7 +108,9 @@ export function InvoicesPage() {
       {[...groups.entries()].map(([key, items]) => {
         const project = projectById.get(String(items[0]?.projectId || ""));
         const clientName = clientById.get(String(items[0]?.clientId || project?.clientId || ""));
-        const draft = drafts.find((invoice) => String(invoice.projectId) === String(items[0]?.projectId));
+        const projectInvoices = visible.filter((invoice) => String(invoice.projectId) === String(items[0]?.projectId));
+        const draft = projectInvoices.find((invoice) => invoice.status === "draft");
+        const existing = projectInvoices.find((invoice) => invoice.status !== "draft");
         return (
           <article key={key} className="mb-4 border border-line bg-white px-4 py-4">
             <div className="flex items-start justify-between gap-3">
@@ -114,7 +122,7 @@ export function InvoicesPage() {
               <Status value={draft ? "draft" : "eligible"} />
             </div>
             <div className="mt-3">
-              {draft ? <Link className="btn btn-primary btn-sm" to={`/invoices/${draft._id}`}>Edit bill</Link> : <Button size="sm" disabled={createBill.isPending} onClick={() => createBill.mutate(items)}>{createBill.isPending ? "Opening" : "Open bill"}</Button>}
+              {draft ? <Link className="btn btn-primary btn-sm" to={`/invoices/${draft._id}`}>Edit bill</Link> : existing && items.every((item) => (existing.lineItems ?? []).some((line) => String(line.sourceId) === String(item._id))) ? <Link className="btn btn-primary btn-sm" to={`/invoices/${existing._id}`}>Open bill</Link> : <Button size="sm" disabled={createBill.isPending} onClick={() => createBill.mutate(items)}>{createBill.isPending ? "Opening" : "Open bill"}</Button>}
             </div>
           </article>
         );
@@ -196,12 +204,9 @@ function openRupeeInvoice(invoice: { invoiceNumber: string; displayStatus: strin
     <table><thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead><tbody>${lines}</tbody></table>
     <div class="totals">${total("Subtotal", invoice.subtotalPaise)}${total("Discount", invoice.discountPaise)}${total("GST", invoice.taxPaise)}${total("Total", invoice.totalPaise, true)}${total("Paid", invoice.paidPaise)}${total("Outstanding", invoice.outstandingPaise)}</div>
     <p class="muted" style="letter-spacing:0;text-transform:none;margin-top:28px">${escapeHtml(invoice.clientNotes || "Amounts are in Indian rupees.")}</p>
-    <button onclick="print()">Save PDF</button>
+    <button type="button" data-print>Save PDF</button>
   </main></body></html>`;
-  const url = URL.createObjectURL(new Blob([html], { type: "text/html" }));
-  const opened = window.open(url, "_blank", "noopener");
-  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-  return Boolean(opened);
+  return openPrintable(html);
 }
 
 export function InvoiceDetailPage() {
@@ -261,7 +266,7 @@ export function InvoiceDetailPage() {
       {message ? <p className={`mt-4 text-sm ${message === "Bill updated." ? "" : "text-danger"}`}>{message}</p> : null}
       <div className="no-print mt-6 flex flex-wrap gap-2">
         {can("invoices.edit") && invoice.status === "draft" ? <Button onClick={() => act.mutate("submit")}>Submit for approval</Button> : null}
-        {user?.role.systemKey === "super_admin" && ["draft", "pending_approval"].includes(invoice.status) ? <Button onClick={() => act.mutate("approve")}>Approve</Button> : null}
+        {hasFullAccess(user?.role.systemKey) && ["draft", "pending_approval"].includes(invoice.status) ? <Button onClick={() => act.mutate("approve")}>Approve</Button> : null}
         {can("invoices.issue") && invoice.status === "approved" ? <Button onClick={() => act.mutate("issue")}>Issue</Button> : null}
         {can("invoices.approve") && invoice.status === "draft" && invoice.paidPaise === 0 ? <Button variant="danger" onClick={() => act.mutate("void", { onSuccess: () => navigate("/invoices") })}>Delete draft</Button> : null}
         {can("invoices.approve") && invoice.status !== "draft" && invoice.status !== "void" && invoice.paidPaise === 0 ? <Button variant="danger" onClick={() => act.mutate("void")}>Void</Button> : null}
@@ -367,7 +372,7 @@ function BillEditor({ invoice, onSaved, onError }: {
 
 const EXPENSE_STAGE: Record<string, string> = {
   pending: "With admin",
-  admin_approved: "With super admin",
+  admin_approved: "Waiting for final approval",
   approved: "Approved",
   rejected: "Rejected",
 };
@@ -399,7 +404,7 @@ export function ExpensesPage() {
   const stage = user?.role.systemKey;
   return (
     <div>
-      <PageHeader eyebrow="Costs" title="Expenses" text="Anyone can file an expense. An admin approves it first. Only a super admin can then approve or reject it. Reports count the super admin's approval." />
+      <PageHeader eyebrow="Costs" title="Expenses" text="Anyone can file an expense. An admin approves it first, and an admin can also make the final decision. Reports count that final approval." />
       <form className="mb-6 grid gap-3 border border-line bg-white p-4 md:grid-cols-4" onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
         <TextInput type="date" value={form.dateKey} onChange={(event) => setForm({ ...form, dateKey: event.target.value })} aria-label="Date" />
         <Select value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} aria-label="Category"><option value="equipment">Equipment</option><option value="travel">Travel</option><option value="rent">Rent</option><option value="software">Software</option><option value="contractor">Contractor</option><option value="production">Production</option><option value="other">Other</option></Select>
@@ -411,7 +416,7 @@ export function ExpensesPage() {
       <div className="table-wrap"><table className="data"><thead><tr><th>Date</th><th>Category</th><th>Description</th><th>Amount</th><th>Status</th><th></th></tr></thead><tbody>
         {(query.data ?? []).map((expense: { _id: string; dateKey: string; category: string; description: string; amountPaise: number; status: string }) => {
           const adminTurn = stage === "admin" && expense.status === "pending";
-          const finalTurn = stage === "super_admin" && expense.status === "admin_approved";
+          const finalTurn = hasFullAccess(stage) && expense.status === "admin_approved";
           return (
             <tr key={expense._id}>
               <td>{expense.dateKey}</td>

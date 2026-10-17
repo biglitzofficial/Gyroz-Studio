@@ -3,6 +3,7 @@ import { Preferences } from "@capacitor/preferences";
 
 const ADDRESS = "gyroz-api-base";
 const REFRESH = "gyroz-refresh";
+export const STUDIO_URL = "https://gyroz-studio-production.up.railway.app";
 
 export function isApp() {
   return Capacitor.isNativePlatform();
@@ -10,13 +11,13 @@ export function isApp() {
 
 export async function studioAddress() {
   if (!isApp()) return "";
-  return (await Preferences.get({ key: ADDRESS })).value ?? "";
+  return STUDIO_URL;
 }
 
 export async function saveStudioAddress(origin: string) {
-  const base = origin.trim().replace(/\/$/, "");
+  const base = (origin.trim() || STUDIO_URL).replace(/\/$/, "");
   if (!/^https?:\/\/[^/\s]+/i.test(base)) {
-    throw new Error("Enter the studio address, such as http://192.168.1.20:4000");
+    throw new Error("The studio address is not valid.");
   }
   await Preferences.set({ key: ADDRESS, value: base });
   return base;

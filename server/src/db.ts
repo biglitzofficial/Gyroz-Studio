@@ -6,7 +6,9 @@ export async function connectDb() {
   const { initializeApp, cert, getApps } = await import("firebase-admin/app");
   const { getFirestore } = await import("firebase-admin/firestore");
   if (!getApps().length) {
-    const serviceAccount = JSON.parse(readFileSync(env.firebaseServiceAccount, "utf8"));
+    const serviceAccount = env.firebaseServiceAccountJson
+      ? JSON.parse(env.firebaseServiceAccountJson)
+      : JSON.parse(readFileSync(env.firebaseServiceAccount ?? "", "utf8"));
     initializeApp({ credential: cert(serviceAccount) });
   }
   bindFirestore(getFirestore());

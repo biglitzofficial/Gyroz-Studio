@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { Firestore } from "firebase-admin/firestore";
+import { publish } from "./live";
 
 let firestore: Firestore | null = null;
 
@@ -36,7 +37,14 @@ function isSchema(value: unknown): value is Schema {
 }
 
 function clone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value, (_key, item) => (item instanceof Date ? { __date: item.toISOString() } : item)), (_key, item) => {
+  if (value === undefined) return undefined as T;
+  const text = JSON.stringify(value, function (key, item) {
+    const original = this && typeof this === "object" ? (this as Record<string, unknown>)[key] : item;
+    if (original instanceof Date) return { __date: original.toISOString() };
+    return item;
+  });
+  if (text === undefined) return undefined as T;
+  return JSON.parse(text, (_key, item) => {
     if (item && typeof item === "object" && typeof item.__date === "string") return new Date(item.__date);
     return item;
   });
@@ -57,14 +65,24 @@ function revive(value: any): any {
 function strip(doc: Row) {
   const out: Row = {};
   for (const [key, value] of Object.entries(doc)) {
-    if (typeof value === "function") continue;
+    if (typeof value === "function" || value === undefined) continue;
     out[key] = clone(value);
   }
   return out;
 }
 
 function getPath(doc: Row, path: string) {
-  return path.split(".").reduce<any>((current, key) => (current == null ? undefined : current[key]), doc);
+  const parts = path.split(".");
+  let current: any = doc;
+  for (const key of parts) {
+    if (current == null) return undefined;
+    if (Array.isArray(current)) {
+      current = current.flatMap((item) => (item == null ? [] : [item[key]])).filter((item) => item !== undefined);
+    } else {
+      current = current[key];
+    }
+  }
+  return current;
 }
 
 function setPath(doc: Row, path: string, value: unknown) {
@@ -306,6 +324,7 @@ class Collection {
     await database().collection(this.name).doc(id).set(JSON.parse(JSON.stringify(stored)));
     stored._id = id;
     this.cache!.set(id, revive(stored));
+    publish(this.name);
   }
 
   doc(data: Row) {
@@ -394,6 +413,7 @@ class Collection {
     if (!row) return { deletedCount: 0 };
     await database().collection(this.name).doc(String(row._id)).delete();
     this.cache?.delete(String(row._id));
+    publish(this.name);
     return { deletedCount: 1 };
   }
 
@@ -403,6 +423,7 @@ class Collection {
       await database().collection(this.name).doc(String(row._id)).delete();
       this.cache?.delete(String(row._id));
     }
+    if (rows.length) publish(this.name);
     return { deletedCount: rows.length };
   }
 

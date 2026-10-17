@@ -3,7 +3,7 @@ import { assertClientAccess, hashPassword, hashToken, hasPermission, type AuthCo
 import { businessDateKey, daysInMonth, eachDateKey, minuteOfDay, minutesBetween, monthBounds, parseClock, weekdayOfKey, zonedTimeToUtc } from "../domain/dates";
 import { calculatePayroll, dayTimeCut, summarizePayable, type DayFact, type PayrollPolicy, type SalaryStructure } from "../domain/payroll";
 import { AppError, escapeRegex, pageParams } from "../http";
-import { distanceMeters } from "../domain/geo";
+import { distanceMeters, punchOutsideOffice } from "../domain/geo";
 import { Attendance, AttendanceToken, Employee, Holiday, LeaveRequest, OvertimeRecord, PayrollAdjustment, PayrollPeriod, Payslip, PunchException, Role, Settings, Shift, Team, User } from "../models";
 import { audit, getSettings, nextEmployeeCode, notify, studioTimezone } from "../platform";
 import { EditingTask, Shoot } from "../models";
@@ -25,6 +25,9 @@ function presentEmployee(auth: AuthContext, employee: Record<string, unknown>) {
   const copy: Record<string, unknown> = { ...employee, id };
   if (!seesCompensation(auth, id)) delete copy.compensation;
   if (!seesBank(auth)) delete copy.bank;
+  delete copy.temporaryPassword;
+  delete copy.createLogin;
+  delete copy.mustChangePassword;
   return copy;
 }
 
@@ -100,8 +103,9 @@ export async function createEmployee(auth: AuthContext, input: Record<string, an
     compensation.dailyRatePaise = settings.payroll?.defaultDailyRatePaise ?? 50_000;
   }
   await alignEmployeeCodes();
+  const { createLogin: _createLogin, temporaryPassword: _temporaryPassword, mustChangePassword: _mustChangePassword, scopeClientIds: _scopeClientIds, scopeProjectIds: _scopeProjectIds, ...employeeInput } = input;
   const employee = await Employee.create({
-    ...input,
+    ...employeeInput,
     employeeCode: await nextEmployeeCode(await currentEmployeeYear()),
     compensation,
     leaveBalance: input.leaveBalance ?? { paid: 12, sick: 6 },
@@ -302,6 +306,15 @@ async function markLate(employeeId: string, checkInAt: Date, timeZone: string) {
   return { late: lateMinutes > 0, lateMinutes, earlyLimit: end, graceMs, shift };
 }
 
+function asDate(value: unknown) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  if (typeof value === "string" || typeof value === "number") {
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) return date;
+  }
+  throw new AppError(409, "CONFLICT", "Today's punch could not be read. Ask an admin to correct it.");
+}
+
 function earlyMinutes(limit: Date | null, graceMs: number, at: Date) {
   if (!limit) return 0;
   return Math.max(0, Math.round((limit.getTime() - graceMs - at.getTime()) / 60000));
@@ -334,14 +347,14 @@ async function placeInOffice(point: { latitude: number; longitude: number; accur
   }
   const settings = await getSettings();
   if (settings.officeLatitude == null || settings.officeLongitude == null) {
-    throw new AppError(409, "CONFLICT", "The office area is not set. A super admin marks it from HRMS while standing in the studio.");
+    throw new AppError(409, "CONFLICT", "The office area is not set. A super admin places it on the map in HRMS.");
   }
   const distance = distanceMeters(
     { latitude: settings.officeLatitude, longitude: settings.officeLongitude },
     { latitude: point.latitude, longitude: point.longitude },
   );
   const radius = settings.officeRadiusMeters ?? 100;
-  const outside = distance > radius;
+  const outside = punchOutsideOffice(distance, radius, point.accuracy);
   if (outside && (settings.officeLocationPolicy ?? "reject") !== "flag") {
     throw new AppError(403, "FORBIDDEN", `You are ${distance} m from the office. Punches are accepted within ${radius} m. Request a correction if this reading is wrong.`);
   }
@@ -374,11 +387,13 @@ async function recordPunch(auth: AuthContext, direction: "in" | "out", source: "
   }
   const existing = await Attendance.findOne({ employeeId: auth.employeeId, dateKey, checkInAt: { $ne: null }, checkOutAt: null });
   if (!existing?.checkInAt) throw new AppError(409, "CONFLICT", "Punch in before punching out.");
-  const timing = await markLate(auth.employeeId, existing.checkInAt, timeZone);
+  const checkInAt = asDate(existing.checkInAt);
+  const timing = await markLate(auth.employeeId, checkInAt, timeZone);
   const leftEarly = earlyMinutes(timing.earlyLimit, timing.graceMs, now);
+  existing.checkInAt = checkInAt;
   existing.checkOutAt = now;
   existing.checkOutSource = source;
-  existing.minutes = minutesBetween(existing.checkInAt, now);
+  existing.minutes = minutesBetween(checkInAt, now);
   existing.earlyDeparture = leftEarly > 0;
   if (place) {
     existing.latitude = place.latitude;
@@ -389,6 +404,15 @@ async function recordPunch(auth: AuthContext, direction: "in" | "out", source: "
   }
   await existing.save();
   return { ...existing.toObject(), note: punchNote("out", timing.lateMinutes, leftEarly) };
+}
+
+export async function assertPunchedIn(auth: AuthContext) {
+  if (auth.systemKey === "super_admin") return;
+  if (!auth.employeeId) throw new AppError(409, "CONFLICT", "Punch in before you log work.");
+  const dateKey = businessDateKey(new Date(), await studioTimezone());
+  const record = await Attendance.findOne({ employeeId: auth.employeeId, dateKey }).lean() as { checkInAt?: Date | null; checkOutAt?: Date | null } | null;
+  if (!record?.checkInAt) throw new AppError(409, "CONFLICT", "Punch in before you log work.");
+  if (record.checkOutAt) throw new AppError(409, "CONFLICT", "You have punched out. Work can be logged only while you are punched in.");
 }
 
 export async function checkIn(auth: AuthContext, code: string) {
@@ -525,7 +549,9 @@ export async function listLeave(auth: AuthContext, query: Record<string, unknown
 }
 
 export async function decideLeave(auth: AuthContext, id: string, status: "approved" | "rejected", decisionNote?: string) {
-  const leave = await LeaveRequest.findOneAndUpdate({ _id: id, status: "pending" }, { $set: { status, decidedBy: auth.userId, decisionNote } }, { new: false });
+  const patch: Record<string, unknown> = { status, decidedBy: auth.userId };
+  if (decisionNote?.trim()) patch.decisionNote = decisionNote.trim();
+  const leave = await LeaveRequest.findOneAndUpdate({ _id: id, status: "pending" }, { $set: patch }, { new: false });
   if (!leave) throw new AppError(409, "CONFLICT", "This leave request is no longer pending.");
   if (status === "approved" && (leave.type === "paid" || leave.type === "sick")) {
     const days = eachDateKey(leave.fromKey, leave.toKey).length;

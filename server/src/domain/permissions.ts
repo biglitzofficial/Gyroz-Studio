@@ -66,20 +66,8 @@ export function allPermissionKeys(): PermissionKey[] {
   return PERMISSION_CATALOG.map((item) => item.key);
 }
 
-const ADMIN_EXCLUSIONS = new Set<PermissionKey>([
-  "roles.manage",
-  "settings.manage",
-  "payroll.view",
-  "payroll.manage",
-  "payroll.approve",
-  "payroll.sensitive",
-  "employees.sensitive",
-  "audit.view",
-  "analytics.financial",
-]);
-
 export function adminPermissions() {
-  return allPermissionKeys().filter((key) => !ADMIN_EXCLUSIONS.has(key));
+  return allPermissionKeys();
 }
 
 export type RoleTemplate = {
@@ -105,7 +93,7 @@ export function roleTemplates(): RoleTemplate[] {
       name: "Admin",
       slug: "admin",
       systemKey: "admin",
-      description: "Day-to-day studio operations, without payroll approval, role control, or sensitive compensation access.",
+      description: "Full company access, the same as the super admin.",
       permissions: adminPermissions(),
       protected: true,
     },

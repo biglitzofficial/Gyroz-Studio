@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, errorMessage } from "@/lib/api";
-import { elapsed, formatStamp, inr, rupeesToPaise, titleCase } from "@/lib/format";
+import { PunchRequired, useOpenPunch } from "@/lib/punch";
+import { elapsed, formatStamp, inr, rupeesToPaise, titleCase, todayKey } from "@/lib/format";
 import { useAuth } from "@/lib/auth";
 import { Button, Empty, Field, LoadingRows, Modal, PageHeader, SaveAction, Select, Status, TextArea, TextInput, Timeline } from "@/components/ui";
 
@@ -18,6 +19,7 @@ const columns = [
 
 export function EditingPage() {
   const { can, user } = useAuth();
+  const punch = useOpenPunch();
   const [params, setParams] = useSearchParams();
   const status = params.get("status") ?? "";
   const setStatus = (value: string) => setParams(value ? { status: value } : {});
@@ -35,7 +37,8 @@ export function EditingPage() {
   const groups = columns.map(([key, label]) => ({ key, label, items: (queue.data ?? []).filter((item: { status: string }) => item.status === key) }));
   return (
     <div>
-      <PageHeader eyebrow="Post" title="Editing queue" text="Claim a cut after the camera hands it over. Log your hours and the outcome, then send it for review. Only one editor holds a cut." />
+      <PageHeader eyebrow="Post" title="Editing queue" text="Claim a cut after the camera hands it over. Log your hours and the outcome, then send it for review. A rework stays with the editor who submitted it. Logging stays closed until you punch in, and it locks again after you punch out." />
+      <PunchRequired />
       <div className="mb-4 flex flex-wrap gap-2">
         <Button size="sm" variant={status === "" ? "ink" : "ghost"} onClick={() => setStatus("")}>All</Button>
         {columns.map(([key, label]) => <Button key={key} size="sm" variant={status === key ? "ink" : "ghost"} onClick={() => setStatus(key)}>{label}</Button>)}
@@ -59,12 +62,12 @@ export function EditingPage() {
                   </div>
                   {item.holdReason ? <p className="mt-2 text-xs text-warning">{item.holdReason}</p> : null}
                   <div className="mt-3 flex flex-wrap gap-2">
-                    {item.priority && group.key === "available" && can("editing.claim") ? <Button size="sm" onClick={() => act.mutate({ id: item._id, action: "claim" })}>Claim</Button> : null}
-                    {group.key === "claimed" && String(item.claimedBy) === user?.id ? <Button size="sm" onClick={() => act.mutate({ id: item._id, action: "start" })}>Start</Button> : null}
-                    {group.key === "in_progress" && String(item.claimedBy) === user?.id ? <Button size="sm" variant="ghost" onClick={() => setHoldId(item._id)}>Hold</Button> : null}
-                    {group.key === "on_hold" && String(item.claimedBy) === user?.id ? <Button size="sm" onClick={() => act.mutate({ id: item._id, action: "resume" })}>Resume</Button> : null}
-                    {["claimed", "in_progress", "on_hold"].includes(group.key) && String(item.claimedBy) === user?.id ? <Button size="sm" variant="ghost" onClick={() => act.mutate({ id: item._id, action: "release" })}>Release</Button> : null}
-                    {group.key === "in_progress" && String(item.claimedBy) === user?.id ? <Link className="text-xs" to={`/deliverables/${item.deliverable?._id}`}>Log hours and outcome</Link> : null}
+                    {punch.open && item.priority && group.key === "available" && can("editing.claim") ? <Button size="sm" onClick={() => act.mutate({ id: item._id, action: "claim" })}>Claim</Button> : null}
+                    {punch.open && group.key === "claimed" && String(item.claimedBy) === user?.id ? <Button size="sm" onClick={() => act.mutate({ id: item._id, action: "start" })}>Start</Button> : null}
+                    {punch.open && group.key === "in_progress" && String(item.claimedBy) === user?.id ? <Button size="sm" variant="ghost" onClick={() => setHoldId(item._id)}>Hold</Button> : null}
+                    {punch.open && group.key === "on_hold" && String(item.claimedBy) === user?.id ? <Button size="sm" onClick={() => act.mutate({ id: item._id, action: "resume" })}>Resume</Button> : null}
+                    {punch.open && ["claimed", "in_progress", "on_hold"].includes(group.key) && String(item.claimedBy) === user?.id ? <Button size="sm" variant="ghost" onClick={() => act.mutate({ id: item._id, action: "release" })}>Release</Button> : null}
+                    {punch.open && group.key === "in_progress" && String(item.claimedBy) === user?.id ? <Link className="text-xs" to={`/deliverables/${item.deliverable?._id}`}>Log hours and outcome</Link> : null}
                   </div>
                 </article>
               ))}
@@ -81,6 +84,7 @@ export function EditingPage() {
 export function DeliverablePage() {
   const { id = "" } = useParams();
   const { can, user } = useAuth();
+  const punch = useOpenPunch();
   const queryClient = useQueryClient();
   const [notes, setNotes] = useState("");
   const [hours, setHours] = useState("");
@@ -126,7 +130,8 @@ export function DeliverablePage() {
             <div className="mt-3 text-xs text-muted">Platform {deliverable.platform || "—"} · {deliverable.aspectRatio || "Format open"} · due {deliverable.deadline || "—"}</div>
             <div className="mt-3 text-sm">{(deliverable.sourceReferences ?? []).map((ref: { url?: string; label?: string }, index: number) => <a key={index} className="mr-3 underline" href={ref.url}>{ref.label || ref.url}</a>)}</div>
           </section>
-          {mine && task.status === "in_progress" && can("editing.submit") ? (
+          {mine && task.status === "in_progress" && can("editing.submit") && !punch.open ? <PunchRequired /> : null}
+          {mine && task.status === "in_progress" && can("editing.submit") && punch.open ? (
             <form className="border border-line bg-white p-4" onSubmit={(event) => {
               event.preventDefault();
               const hoursSpent = Number(hours);
@@ -134,10 +139,10 @@ export function DeliverablePage() {
               if (notes.trim().length < 2) { setMessage("Describe the outcome in a sentence."); return; }
               run.mutate({ loading: "Handing to review", toast: "Handed to review.", run: () => api.post(`/editing/${task._id}/submit`, { notes: notes.trim(), hoursSpent }) });
             }}>
-              <h2 className="font-medium">Log the outcome, then send it on</h2>
-              <p className="mt-1 text-sm text-muted">After review, the social manager or an admin can post this.</p>
+              <h2 className="font-medium">{task.holdReason ? "Log the rework, then send it on" : "Log the outcome, then send it on"}</h2>
+              {task.holdReason ? <p className="mt-2 border border-line bg-paper px-3 py-2 text-sm">Sent back: {task.holdReason}</p> : <p className="mt-1 text-sm text-muted">After review, the social manager or an admin can post this.</p>}
               <Field label="Hours spent"><TextInput inputMode="decimal" value={hours} onChange={(event) => setHours(event.target.value)} placeholder="2.5" /></Field>
-              <Field label="Outcome"><TextArea maxLength={240} value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="What was cut, and what is ready." /></Field>
+              <Field label="Outcome"><TextArea maxLength={240} value={notes} onChange={(event) => setNotes(event.target.value)} placeholder={task.holdReason ? "What you changed for this rework." : "What was cut, and what is ready."} /></Field>
               <SaveAction className="mt-3" changed label="Hand to review" />
             </form>
           ) : null}
@@ -216,7 +221,7 @@ export function ReshootsPage() {
   });
   return (
     <div>
-      <PageHeader eyebrow="Accountability" title="Reshoots" text="A reshoot stays attached to the original deliverable. Billing is a separate decision." />
+      <PageHeader eyebrow="Accountability" title="Reshoots" text="Approving sends the rework to the original cameraman. They log it on Shoots, then the same video goes back through editing, review, and posting." />
       {(query.data ?? []).length ? (
         <div className="table-wrap"><table className="data"><thead><tr><th>Code</th><th>Reason</th><th>Approval</th><th>Billing</th><th>Charge</th><th></th></tr></thead><tbody>
           {(query.data ?? []).map((item: { _id: string; reshootCode: string; reason: string; approvalStatus: string; billableDecision: string; chargePaise: number; deliverableId: string }) => (
@@ -226,7 +231,7 @@ export function ReshootsPage() {
               <td><Status value={item.approvalStatus} /></td>
               <td><Status value={item.billableDecision} /></td>
               <td className="num">{item.chargePaise ? inr(item.chargePaise) : "—"}</td>
-              <td className="flex gap-2">{item.approvalStatus === "pending" && can("reshoots.approve") ? <><Button size="sm" onClick={() => setChargeFor(item._id)}>Approve charge</Button><Button size="sm" variant="ghost" onClick={() => decide.mutate({ id: item._id, charge: 0 })}>Waive</Button></> : <Link to={`/deliverables/${item.deliverableId}`}>Open</Link>}</td>
+              <td className="flex gap-2">{item.approvalStatus === "pending" && can("reshoots.approve") ? <><Button size="sm" onClick={() => setChargeFor(item._id)}>Approve charge</Button><Button size="sm" variant="ghost" onClick={() => decide.mutate({ id: item._id, charge: 0 })}>Waive</Button></> : item.approvalStatus === "approved" ? <span className="text-sm">With the cameraman</span> : <Link to={`/deliverables/${item.deliverableId}`}>Open</Link>}</td>
             </tr>
           ))}
         </tbody></table></div>
@@ -250,11 +255,14 @@ export function ReshootsPage() {
   );
 }
 
+type ReachReading = { views: number; likes: number; recordedOn: string; note?: string; recordedAt?: string };
+
 type PublishItem = {
   _id: string;
   platform: string;
   status: string;
   scheduledAt?: string;
+  publishedAt?: string;
   publishedUrl?: string;
   deliverableId: string;
   clientId?: string;
@@ -266,86 +274,159 @@ type PublishItem = {
   notes?: string;
   outcome?: string;
   hoursSpent?: number;
+  viewCount?: number;
+  likeCount?: number;
+  metricsUpdatedAt?: string;
+  readings?: ReachReading[];
   deliverable?: { title?: string; deliverableCode?: string; brief?: string; deadline?: string; aspectRatio?: string; revisionCount?: number; projectId?: string; clientId?: string };
 };
 
+type PublishPage = {
+  items: PublishItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+  summary: { total: number; published: number; tracked: number };
+};
+
+const PAGE_SIZE = 20;
+const STATUSES = [["", "All"], ["ready", "Ready"], ["scheduled", "Scheduled"], ["published", "Published"], ["failed", "Failed"]] as const;
+const REACH = [["", "All reach"], ["views", "High views"], ["likes", "High likes"], ["untracked", "Not tracked"]] as const;
+
+function tally(value?: number) {
+  if (value == null) return "—";
+  return new Intl.NumberFormat("en-IN").format(value);
+}
+
 export function PublishingPage() {
-  const { can } = useAuth();
+  const { can, user } = useAuth();
+  const punch = useOpenPunch();
   const [view, setView] = useState<"list" | "calendar">("list");
-  const [dialog, setDialog] = useState<{ id: string; path: "schedule" | "publish" } | null>(null);
+  const [page, setPage] = useState(1);
+  const [status, setStatus] = useState("");
+  const [reach, setReach] = useState("");
+  const [search, setSearch] = useState("");
+  const [q, setQ] = useState("");
+  const [dialog, setDialog] = useState<{ id: string; path: "schedule" | "publish" | "reach" } | null>(null);
   const queryClient = useQueryClient();
-  const query = useQuery({ queryKey: ["publishing"], queryFn: async () => (await api.get("/publishing")).data.data as PublishItem[] });
-  const deliverables = useQuery({
-    queryKey: ["deliverables", "publish"],
-    enabled: can("deliverables.view"),
-    queryFn: async () => (await api.get("/deliverables", { params: { limit: 100 } })).data.data as Array<{ _id: string; title: string; deliverableCode: string; brief?: string; deadline?: string; aspectRatio?: string; revisionCount?: number; projectId?: string; clientId?: string }>,
+  useEffect(() => {
+    const timer = window.setTimeout(() => setQ(search.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+  const query = useQuery({
+    queryKey: ["publishing", page, status, reach, q],
+    queryFn: async () => (await api.get("/publishing", { params: { page, limit: PAGE_SIZE, ...(status ? { status } : {}), ...(reach ? { reach } : {}), ...(q ? { q } : {}) } })).data.data as PublishPage,
+    enabled: view === "list",
   });
-  const projects = useQuery({
-    queryKey: ["projects", "publish"],
-    enabled: can("projects.view"),
-    queryFn: async () => (await api.get("/projects", { params: { limit: 100 } })).data.data as Array<{ _id: string; name: string; projectCode?: string; clientId?: string }>,
-  });
-  const clients = useQuery({
-    queryKey: ["clients", "publish"],
-    enabled: can("clients.view"),
-    queryFn: async () => (await api.get("/clients", { params: { limit: 100 } })).data.data as Array<{ _id?: string; id?: string; name: string }>,
+  const calendar = useQuery({
+    queryKey: ["publishing", "calendar"],
+    queryFn: async () => (await api.get("/publishing")).data.data as PublishItem[],
+    enabled: view === "calendar",
   });
   const act = useMutation({
     mutationFn: async ({ id, path, body }: { id: string; path: string; body: unknown }) => api.post(`/publishing/${id}/${path}`, body),
     meta: {
-      loading: (job: { path: string }) => job.path === "publish" ? "Publishing" : "Scheduling",
-      toast: (_data: unknown, job: { path: string }) => job.path === "publish" ? "Published." : "Scheduled.",
+      loading: (job: { path: string }) => job.path === "metrics" ? "Saving reach" : job.path === "publish" ? "Publishing" : "Scheduling",
+      toast: (_data: unknown, job: { path: string }) => job.path === "metrics" ? "Reach saved." : job.path === "publish" ? "Published." : "Scheduled.",
     },
     onSuccess: () => { setDialog(null); queryClient.invalidateQueries({ queryKey: ["publishing"] }); queryClient.invalidateQueries({ queryKey: ["deliverable"] }); },
   });
-  const deliverableById = new Map((deliverables.data ?? []).map((item) => [item._id, item]));
-  const projectById = new Map((projects.data ?? []).map((item) => [item._id, item]));
-  const clientById = new Map((clients.data ?? []).map((item) => [String(item._id || item.id), item.name]));
-  const items = (query.data ?? []).map((item) => {
-    const deliverable = item.deliverable?.title ? item.deliverable : deliverableById.get(item.deliverableId);
-    const project = projectById.get(String(item.projectId || deliverable?.projectId || ""));
-    const clientName = item.clientName || clientById.get(String(item.clientId || deliverable?.clientId || project?.clientId || "")) || "";
-    return {
-      ...item,
-      clientName,
-      projectName: item.projectName || project?.name || "",
-      projectCode: item.projectCode || project?.projectCode || "",
-      deliverable,
-    };
-  });
-  const active = items.find((item) => item._id === dialog?.id);
+  const pageData = query.data;
+  const items = pageData?.items ?? [];
+  const active = items.find((item) => item._id === dialog?.id) ?? (calendar.data ?? []).find((item) => item._id === dialog?.id);
+  const summary = pageData?.summary;
+  const total = pageData?.total ?? 0;
+  const pageSize = pageData?.pageSize ?? PAGE_SIZE;
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const from = total ? (page - 1) * pageSize + 1 : 0;
+  const to = Math.min(total, page * pageSize);
+  function pickStatus(value: string) {
+    setStatus(value);
+    setPage(1);
+  }
+  function pickReach(value: string) {
+    setReach(value);
+    if (value) setStatus("");
+    setPage(1);
+  }
+  useEffect(() => {
+    if (!pageData) return;
+    const last = Math.max(1, Math.ceil(pageData.total / (pageData.pageSize || PAGE_SIZE)));
+    if (page > last) setPage(last);
+  }, [pageData, page]);
   return (
     <div>
-      <PageHeader eyebrow="Distribution" title="Publishing" text={`Posted ${items.filter((item) => item.status === "published").length} of ${items.length}. Each row is the client, the project, and the cut the camera and editor already finished. Record the live link to open a draft invoice.`} actions={<Button variant="ghost" onClick={() => setView(view === "list" ? "calendar" : "list")}>{view === "list" ? "Calendar" : "List"}</Button>} />
+      <PageHeader eyebrow="Distribution" title="Publishing" text={`Posted ${summary?.published ?? 0} of ${summary?.total ?? 0}. After a post is live, record views and likes, then update those numbers whenever you check the platform. ${summary?.tracked ?? 0} published posts have a reading. Publishing stays closed until you punch in.`} actions={<Button variant="ghost" onClick={() => setView(view === "list" ? "calendar" : "list")}>{view === "list" ? "Calendar" : "List"}</Button>} />
+      <PunchRequired />
       {act.isError ? <p className="mb-3 text-sm text-danger">{errorMessage(act.error)}</p> : null}
-      {query.isLoading ? <LoadingRows /> : view === "calendar" ? <PublishCalendar items={items} /> : (
-        <div className="space-y-3">
-          {items.map((item) => (
-            <article key={item._id} className="border border-line bg-white px-4 py-4">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="text-[11px] uppercase tracking-[0.12em] text-muted">{item.clientName || "Client"} · {item.projectName || "Project"}{item.projectCode ? ` · ${item.projectCode}` : ""}</div>
-                  <Link className="mt-1 block font-medium" to={`/deliverables/${item.deliverableId}`}>{item.deliverable?.title || item.platform}</Link>
-                  <div className="mt-1 text-xs text-muted">{item.deliverable?.deliverableCode || "Cut"} · {item.platform} · {item.deliverable?.aspectRatio || "Format open"} · due {item.deliverable?.deadline || "—"} · rev {item.deliverable?.revisionCount ?? 0}</div>
-                </div>
-                <Status value={item.status} />
-              </div>
-              <p className="mt-3 text-sm text-graphite">{item.caption || item.deliverable?.brief || "No brief recorded."}</p>
-              {item.outcome ? <p className="mt-2 text-sm text-muted">Editor: {item.outcome}{item.hoursSpent ? ` · ${item.hoursSpent}h` : ""}</p> : null}
-              {item.notes ? <p className="mt-2 text-sm text-muted">{item.notes}</p> : null}
-              <div className="mt-3 text-xs text-muted">{item.scheduledAt ? new Date(item.scheduledAt).toLocaleString("en-IN") : "Not scheduled"}{item.publishedUrl ? ` · ${item.publishedUrl}` : ""}</div>
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                {can("publishing.schedule") && item.status !== "published" ? <Button size="sm" variant="ghost" onClick={() => setDialog({ id: item._id, path: "schedule" })}>Schedule</Button> : null}
-                {can("publishing.publish") && item.status !== "published" ? <Button size="sm" onClick={() => setDialog({ id: item._id, path: "publish" })}>Publish</Button> : null}
-                <Link className="text-sm" to={`/deliverables/${item.deliverableId}`}>Open the cut</Link>
-              </div>
-            </article>
-          ))}
+      {view === "list" ? (
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <TextInput className="w-full sm:w-64" value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Search client, project, or cut" aria-label="Search posts" />
+          <div className="w-full sm:w-40"><Select value={status} aria-label="Status" onChange={(event) => pickStatus(event.target.value)}>
+            {STATUSES.map(([value, label]) => <option key={value || "all"} value={value}>{label}</option>)}
+          </Select></div>
+          <div className="w-full sm:w-44"><Select value={reach} aria-label="Reach" onChange={(event) => pickReach(event.target.value)}>
+            {REACH.map(([value, label]) => <option key={value || "reach"} value={value}>{label}</option>)}
+          </Select></div>
         </div>
-      )}
-      {!items.length && !query.isLoading ? <Empty title="Nothing is ready to publish" text="Approved deliverables appear here. Approval is never implied by an upload." /> : null}
+      ) : null}
+      {view === "calendar" ? (calendar.isLoading ? <LoadingRows /> : <PublishCalendar items={calendar.data ?? []} />) : query.isLoading ? <LoadingRows /> : items.length ? (
+        <>
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Cut</th>
+                  <th>Client</th>
+                  <th>Project</th>
+                  <th>Platform</th>
+                  <th>Status</th>
+                  <th>Views</th>
+                  <th>Likes</th>
+                  <th>Updated</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item) => (
+                  <tr key={item._id}>
+                    <td data-label="Cut">
+                      <Link className="font-medium" to={`/deliverables/${item.deliverableId}`}>{item.deliverable?.title || item.platform}</Link>
+                      <div className="text-xs text-muted">{item.deliverable?.deliverableCode || "Cut"}</div>
+                    </td>
+                    <td data-label="Client">{item.clientName || "—"}</td>
+                    <td data-label="Project">{item.projectName || "—"}{item.projectCode ? <div className="text-xs text-muted">{item.projectCode}</div> : null}</td>
+                    <td data-label="Platform">{item.platform}</td>
+                    <td data-label="Status"><Status value={item.status} /></td>
+                    <td data-label="Views" className="num">{item.status === "published" ? tally(item.viewCount) : "—"}</td>
+                    <td data-label="Likes" className="num">{item.status === "published" ? tally(item.likeCount) : "—"}</td>
+                    <td data-label="Updated">{item.metricsUpdatedAt ? new Date(item.metricsUpdatedAt).toLocaleDateString("en-IN") : item.status === "published" ? "Not tracked" : "—"}</td>
+                    <td data-label="">
+                      <div className="flex flex-wrap gap-2">
+                        {can("publishing.schedule") && item.status !== "published" ? <Button size="sm" variant="ghost" onClick={() => setDialog({ id: item._id, path: "schedule" })}>Schedule</Button> : null}
+                        {punch.open && can("publishing.publish") && item.status !== "published" ? <Button size="sm" onClick={() => setDialog({ id: item._id, path: "publish" })}>Publish</Button> : null}
+                        {can("publishing.publish") && item.status === "published" ? <Button size="sm" onClick={() => setDialog({ id: item._id, path: "reach" })}>{item.metricsUpdatedAt ? "Update reach" : "Add reach"}</Button> : null}
+                        {item.publishedUrl ? <a className="text-sm" href={item.publishedUrl} target="_blank" rel="noreferrer">Live</a> : null}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-sm text-muted">
+            <span>{total ? `${from}–${to} of ${total}` : "No posts in this view"}</span>
+            <span className="flex gap-2">
+              <Button size="sm" variant="ghost" disabled={page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</Button>
+              <Button size="sm" variant="ghost" disabled={page >= pages} onClick={() => setPage((current) => current + 1)}>Next</Button>
+            </span>
+          </div>
+        </>
+      ) : null}
+      {!query.isLoading && view === "list" && !items.length ? <Empty title={summary?.total ? "Nothing matches this filter" : "Nothing is ready to publish"} text={summary?.total ? "Clear the search or choose another filter." : "Approved deliverables appear here. Approval is never implied by an upload."} /> : null}
       {dialog && active && dialog.path === "schedule" ? <Ask title={`Schedule ${active.deliverable?.title || active.platform}`} detail={`${active.clientName || "Client"} · ${active.projectName || "Project"} · ${active.platform}`} label="Date and time" submitLabel="Schedule" inputType="datetime-local" onClose={() => setDialog(null)} onSubmit={(value) => act.mutate({ id: dialog.id, path: "schedule", body: { scheduledAt: new Date(value).toISOString() } })} /> : null}
       {dialog && active && dialog.path === "publish" ? <PublishDialog item={active} onClose={() => setDialog(null)} onSubmit={(body) => act.mutate({ id: dialog.id, path: "publish", body })} /> : null}
+      {dialog && active && dialog.path === "reach" ? <ReachDialog item={active} zone={user?.studio?.businessTimezone} onClose={() => setDialog(null)} onSubmit={(body) => act.mutate({ id: dialog.id, path: "metrics", body })} /> : null}
     </div>
   );
 }
@@ -393,6 +474,57 @@ function PublishDialog({ item, onClose, onSubmit }: { item: PublishItem; onClose
         <Field label="Live URL"><TextInput type="url" value={url} onChange={(event) => setUrl(event.target.value)} required /></Field>
         {error ? <p className="mt-2 text-sm text-danger">{error}</p> : null}
         <div className="mt-4 flex gap-2"><Button type="submit">Publish</Button><Button variant="ghost" onClick={onClose}>Cancel</Button></div>
+      </form>
+    </Modal>
+  );
+}
+
+function ReachDialog({ item, zone, onClose, onSubmit }: { item: PublishItem; zone?: string; onClose: () => void; onSubmit: (body: { views: number; likes: number; recordedOn: string; note?: string }) => void }) {
+  const [views, setViews] = useState(item.metricsUpdatedAt ? String(item.viewCount ?? 0) : "");
+  const [likes, setLikes] = useState(item.metricsUpdatedAt ? String(item.likeCount ?? 0) : "");
+  const [recordedOn, setRecordedOn] = useState(todayKey(zone ?? "Asia/Kolkata"));
+  const [note, setNote] = useState("");
+  const [error, setError] = useState("");
+  const history = item.readings ?? [];
+  return (
+    <Modal title={`Reach · ${item.deliverable?.title || item.platform}`} onClose={onClose}>
+      <form onSubmit={(event) => {
+        event.preventDefault();
+        const viewCount = Number(views.trim());
+        const likeCount = Number(likes.trim());
+        if (views.trim() === "" || likes.trim() === "" || !Number.isInteger(viewCount) || viewCount < 0 || !Number.isInteger(likeCount) || likeCount < 0) {
+          setError("Enter views and likes as whole numbers.");
+          return;
+        }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(recordedOn)) {
+          setError("Choose the date you checked the post.");
+          return;
+        }
+        setError("");
+        onSubmit({ views: viewCount, likes: likeCount, recordedOn, note: note.trim() || undefined });
+      }}>
+        <p className="mb-3 text-sm text-muted">{item.clientName || "Client"} · {item.projectName || "Project"} · {item.platform}. Saving keeps this reading and sets the current views and likes.</p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Views"><TextInput inputMode="numeric" value={views} onChange={(event) => setViews(event.target.value)} required /></Field>
+          <Field label="Likes"><TextInput inputMode="numeric" value={likes} onChange={(event) => setLikes(event.target.value)} required /></Field>
+        </div>
+        <Field label="Date checked"><TextInput type="date" value={recordedOn} onChange={(event) => setRecordedOn(event.target.value)} required /></Field>
+        <Field label="Note"><TextInput maxLength={160} value={note} onChange={(event) => setNote(event.target.value)} placeholder="Optional. What you noticed on the platform." /></Field>
+        {error ? <p className="mt-2 text-sm text-danger">{error}</p> : null}
+        <div className="mt-4 flex gap-2"><Button type="submit">Save reach</Button><Button variant="ghost" onClick={onClose}>Cancel</Button></div>
+        {history.length ? (
+          <div className="mt-5">
+            <h3 className="text-sm font-medium">Earlier readings</h3>
+            <ul className="mt-2">
+              {history.map((reading, index) => (
+                <li key={`${reading.recordedAt ?? reading.recordedOn}-${index}`} className="border-b border-line py-2 text-sm">
+                  <span className="num">{tally(reading.views)} views</span> · <span className="num">{tally(reading.likes)} likes</span>
+                  <span className="text-muted"> · {reading.recordedOn}{reading.note ? ` · ${reading.note}` : ""}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
       </form>
     </Modal>
   );

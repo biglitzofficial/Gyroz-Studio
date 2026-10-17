@@ -1,0 +1,12 @@
+node_modules
+**/node_modules
+dist
+client/dist
+server/dist
+.git
+.env
+*.apk
+*firebase-adminsdk*.json
+uploads
+server/uploads
+client/android

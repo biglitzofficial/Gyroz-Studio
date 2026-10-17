@@ -1,7 +1,7 @@
 import { hasPermission, scopeFilter, type AuthContext } from "../auth";
 import { businessDateKey, rangeFromKeys } from "../domain/dates";
 import { AppError, escapeRegex } from "../http";
-import { Attendance, Client, Deliverable, EditingTask, Employee, Expense, Invoice, LeaveRequest, Payment, PayrollPeriod, Payslip, Project, PublishingTask, Reshoot, Shoot } from "../models";
+import { Attendance, Client, Deliverable, EditingTask, Employee, Equipment, Expense, Invoice, LeaveRequest, Payment, PayrollPeriod, Payslip, Project, PublishingTask, Reshoot, Shoot } from "../models";
 import { Activity } from "../models";
 import { studioTimezone } from "../platform";
 import { upcomingPlans } from "./plans";
@@ -222,17 +222,18 @@ export async function performanceReport(auth: AuthContext, fromKey: string, toKe
 export async function searchRecords(auth: AuthContext, q: string) {
   if (!hasPermission(auth, "search.view")) throw new AppError(403, "FORBIDDEN", "You do not have permission for this action.");
   const term = escapeRegex(q.trim());
-  if (term.length < 2) return { clients: [], projects: [], deliverables: [], invoices: [], employees: [] };
+  if (term.length < 2) return { clients: [], projects: [], deliverables: [], invoices: [], employees: [], assets: [] };
   const regex = { $regex: term, $options: "i" };
   const scope = scopeFilter(auth);
-  const [clients, projects, deliverables, invoices, employees] = await Promise.all([
+  const [clients, projects, deliverables, invoices, employees, assets] = await Promise.all([
     hasPermission(auth, "clients.view") ? Client.find({ ...(auth.scopeClientIds.length && !auth.isSuperAdmin ? { _id: { $in: auth.scopeClientIds } } : {}), $or: [{ name: regex }, { clientCode: regex }] }).limit(6).lean() as any : [],
     hasPermission(auth, "projects.view") ? Project.find({ ...scope, $or: [{ name: regex }, { projectCode: regex }] }).limit(6).lean() as any : [],
     hasPermission(auth, "deliverables.view") ? Deliverable.find({ ...scope, $or: [{ title: regex }, { deliverableCode: regex }] }).limit(6).lean() as any : [],
     hasPermission(auth, "invoices.view") ? Invoice.find({ ...scope, invoiceNumber: regex }).limit(6).lean() as any : [],
     hasPermission(auth, "employees.view") ? Employee.find({ $or: [{ firstName: regex }, { lastName: regex }, { employeeCode: regex }] }).select("firstName lastName employeeCode designation").limit(6).lean() as any : [],
+    auth.isSuperAdmin ? Equipment.find({ $or: [{ name: regex }, { assetCode: regex }, { serialNumber: regex }, { brand: regex }] }).select("name assetCode category status").limit(6).lean() as any : [],
   ]);
-  return { clients, projects, deliverables, invoices, employees };
+  return { clients, projects, deliverables, invoices, employees, assets };
 }
 
 export async function listNotifications(auth: AuthContext) {
@@ -258,6 +259,21 @@ export async function listAudit(query: Record<string, unknown>) {
 }
 
 export async function updateSettings(auth: AuthContext, input: Record<string, unknown>) {
+  if ("officeLatitude" in input || "officeLongitude" in input || "officeRadiusMeters" in input) {
+    const latitude = Number(input.officeLatitude);
+    const longitude = Number(input.officeLongitude);
+    const meters = Number(input.officeRadiusMeters);
+    if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+      throw new AppError(400, "VALIDATION", "Place the office on the map.");
+    }
+    if (!Number.isInteger(meters) || meters < 30 || meters > 500) {
+      throw new AppError(400, "VALIDATION", "Use a radius from 30 to 500 metres.");
+    }
+    if (input.officeLocationPolicy !== "reject" && input.officeLocationPolicy !== "flag") {
+      throw new AppError(400, "VALIDATION", "Choose what happens outside the office.");
+    }
+    input = { ...input, officeLatitude: latitude, officeLongitude: longitude, officeRadiusMeters: meters };
+  }
   const { Settings } = await import("../models");
   const before = await Settings.findOne({ key: "studio" }).lean() as any;
   const settings = await Settings.findOneAndUpdate({ key: "studio" }, { $set: input }, { new: true });

@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, errorMessage } from "@/lib/api";
+import { openPrintable } from "@/lib/print";
 import { preparePunch, readPosition } from "@/lib/studio";
 import { inr, todayKey } from "@/lib/format";
-import { useAuth } from "@/lib/auth";
-import { Button, Empty, Field, LoadingRows, Notice, PageHeader, SaveAction, SavedMark, Select, Status, TextInput } from "@/components/ui";
+import { hasFullAccess, useAuth } from "@/lib/auth";
+import { ShiftDay } from "@/components/ShiftDay";
+import { Button, Empty, Field, LoadingRows, Modal, Notice, PageHeader, SaveAction, SavedMark, Select, Status, TextInput } from "@/components/ui";
 
 export function EmployeesPage() {
   const { can } = useAuth();
@@ -147,6 +149,14 @@ function monthCells(anchor: string) {
   });
 }
 
+function workedLabel(from: string, now: Date) {
+  const minutes = Math.max(0, Math.round((now.getTime() - new Date(from).getTime()) / 60000));
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (hours === 0) return `${rest}m`;
+  return `${hours}h ${String(rest).padStart(2, "0")}m`;
+}
+
 function shiftMonth(anchor: string, delta: number) {
   const [year, month] = anchor.split("-").map(Number);
   const date = new Date(year, month - 1 + delta, 1);
@@ -160,6 +170,8 @@ export function AttendancePage() {
   const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState("");
+  const [confirmOut, setConfirmOut] = useState(false);
+  const [now, setNow] = useState(() => new Date());
   const videoRef = useRef<HTMLVideoElement>(null);
   const stopScan = useRef<(() => void) | null>(null);
   const direction = useRef<"punch-in" | "punch-out">("punch-in");
@@ -172,7 +184,7 @@ export function AttendancePage() {
   });
   const todayRows = useQuery({
     queryKey: ["attendance", "today", today],
-    queryFn: async () => (await api.get("/attendance", { params: { from: today, to: today } })).data.data as Array<{ employeeId: string; checkInAt?: string; checkOutAt?: string }>,
+    queryFn: async () => (await api.get("/attendance", { params: { from: today, to: today } })).data.data as Array<{ employeeId: string; checkInAt?: string; checkOutAt?: string; late?: boolean; earlyDeparture?: boolean }>,
     enabled: Boolean(user?.employeeId),
   });
   const mine = (todayRows.data ?? []).find((row) => String(row.employeeId) === user?.employeeId);
@@ -185,8 +197,15 @@ export function AttendancePage() {
     onSuccess: (result) => { setMessage(result.note || "Attendance recorded."); queryClient.invalidateQueries({ queryKey: ["attendance"] }); },
     onError: (error) => setMessage(errorMessage(error)),
   });
-  direction.current = mine?.checkInAt ? "punch-out" : "punch-in";
+  direction.current = mine?.checkInAt && !mine.checkOutAt ? "punch-out" : "punch-in";
+  const onTheClock = Boolean(mine?.checkInAt && !mine.checkOutAt);
+  const worked = onTheClock && mine?.checkInAt ? workedLabel(mine.checkInAt, now) : "";
   useEffect(() => () => stopScan.current?.(), []);
+  useEffect(() => {
+    if (!onTheClock) return;
+    const timer = window.setInterval(() => setNow(new Date()), 15000);
+    return () => window.clearInterval(timer);
+  }, [onTheClock]);
   async function scanOffice() {
     setScanError("");
     setMessage("");
@@ -230,14 +249,16 @@ export function AttendancePage() {
   return (
     <div>
       <PageHeader eyebrow="Time" title="Attendance" text="Scan the QR on the office screen. That screen is a separate link, so it cannot open the rest of the studio. The phone must be inside the office area. The day is 9:30 to 7:30, with 10 minutes of grace." />
+      {user?.role.systemKey !== "super_admin" ? <ShiftDay link={false} /> : null}
       {can("attendance.self") && user?.employeeId ? (
         <section className="mb-6 border border-line bg-white p-4">
           <div className="text-sm text-muted">Today · {today}</div>
-          <p className="mt-2 text-sm">{mine?.checkInAt ? `In ${new Date(mine.checkInAt).toLocaleTimeString("en-IN")}` : "Not punched in"}{mine?.checkOutAt ? ` · Out ${new Date(mine.checkOutAt).toLocaleTimeString("en-IN")}` : ""}</p>
-          {mine?.checkOutAt ? <p className="mt-3 text-sm text-muted">Done for today</p> : (
+          <p className={`mt-2 inline-block px-2 py-1 text-sm ${mine?.checkInAt ? (mine.late || mine.earlyDeparture ? "day-late" : "day-present") : ""}`}>{mine?.checkInAt ? `${mine.late ? "Late" : mine.earlyDeparture ? "Left early" : "Present"} · In ${new Date(mine.checkInAt).toLocaleTimeString("en-IN")}` : "Not punched in"}{mine?.checkOutAt ? ` · Out ${new Date(mine.checkOutAt).toLocaleTimeString("en-IN")}` : ""}</p>
+          {onTheClock ? <p className="num mt-3 text-lg">Worked {worked}</p> : null}
+          {mine?.checkOutAt ? <p className="mt-3 text-sm text-muted">Done for today{mine.checkInAt ? ` · worked ${workedLabel(mine.checkInAt, new Date(mine.checkOutAt))}` : ""}</p> : (
             <div className="mt-3">
               <video ref={videoRef} className={scanning ? "mb-3 h-56 w-full max-w-sm bg-ink object-cover" : "hidden"} muted playsInline />
-              <Button onClick={() => void scanOffice()} disabled={punch.isPending || scanning}>{punch.isPending ? "Saving" : scanning ? "Scanning" : mine?.checkInAt ? "Scan to punch out" : "Scan to punch in"}</Button>
+              <Button onClick={() => { if (onTheClock) { setNow(new Date()); setConfirmOut(true); return; } void scanOffice(); }} disabled={punch.isPending || scanning}>{punch.isPending ? "Saving" : scanning ? "Scanning" : onTheClock ? "Punch out" : "Scan to punch in"}</Button>
               {scanError ? <p className="mt-2 text-sm text-danger">{scanError}</p> : null}
             </div>
           )}
@@ -245,13 +266,26 @@ export function AttendancePage() {
         </section>
       ) : null}
       {can("attendance.correct") ? <PunchDecisions /> : null}
+      {confirmOut ? (
+        <Modal title="Punch out?" onClose={() => setConfirmOut(false)}>
+          <p className="text-sm">You have worked <span className="num font-medium">{worked || "0m"}</span>{mine?.checkInAt ? ` since ${new Date(mine.checkInAt).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}` : ""}. The day closes only after you scan the office QR.</p>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Button onClick={() => { setConfirmOut(false); void scanOffice(); }}>Scan QR and punch out</Button>
+            <Button variant="ghost" onClick={() => setConfirmOut(false)}>Stay</Button>
+          </div>
+        </Modal>
+      ) : null}
       {message ? <p className="mb-3 text-sm">{message}</p> : null}
       {can("attendance.manage") ? <PendingDecisions /> : null}
       {staffCalendar ? <AttendanceCalendar month={month} onMonth={setMonth} punches={rows.data ?? []} onChanged={() => setMessage("Saved. It shows on your calendar.")} /> : null}
       <div className="table-wrap"><table className="data"><thead><tr><th>Date</th><th>In</th><th>Out</th><th>Minutes</th><th>Mark</th></tr></thead><tbody>
-        {(rows.data ?? []).map((row: { _id: string; dateKey: string; checkInAt?: string; checkOutAt?: string; minutes: number; late?: boolean; earlyDeparture?: boolean; locationStatus?: string }) => (
-          <tr key={row._id}><td>{row.dateKey}</td><td>{row.checkInAt ? new Date(row.checkInAt).toLocaleTimeString("en-IN") : "—"}</td><td>{row.checkOutAt ? new Date(row.checkOutAt).toLocaleTimeString("en-IN") : "—"}</td><td className="num">{row.minutes}</td><td>{row.late ? "Late" : "On time"}{row.earlyDeparture ? " · left early" : ""}{row.checkInAt && !row.checkOutAt ? " · still in" : ""}{row.locationStatus === "outside" ? " · outside office" : row.locationStatus === "inside" ? " · in office" : ""}</td></tr>
-        ))}
+        {(rows.data ?? []).map((row: { _id: string; dateKey: string; checkInAt?: string; checkOutAt?: string; minutes: number; late?: boolean; earlyDeparture?: boolean; locationStatus?: string }) => {
+          const tone = !row.checkInAt ? "absent" : row.late || row.earlyDeparture ? "late" : "present";
+          const mark = !row.checkInAt ? "Absent" : row.late ? "Late" : row.earlyDeparture ? "Left early" : "Present";
+          return (
+            <tr key={row._id}><td>{row.dateKey}</td><td>{row.checkInAt ? new Date(row.checkInAt).toLocaleTimeString("en-IN") : "—"}</td><td>{row.checkOutAt ? new Date(row.checkOutAt).toLocaleTimeString("en-IN") : "—"}</td><td className="num">{row.minutes}</td><td><span className={`inline-block px-2 py-1 day-${tone}`}>{mark}{row.checkInAt && !row.checkOutAt ? " · still in" : ""}{row.locationStatus === "outside" ? " · outside office" : row.locationStatus === "inside" ? " · in office" : ""}</span></td></tr>
+          );
+        })}
       </tbody></table></div>
     </div>
   );
@@ -382,12 +416,16 @@ function PendingDecisions() {
   );
 }
 
+type DayTone = "present" | "late" | "leave" | "pending" | "absent" | "off" | "";
+
 function AttendanceCalendar({ month, onMonth, punches, onChanged }: {
   month: string;
   onMonth: (month: string) => void;
-  punches: Array<{ _id: string; dateKey: string; checkInAt?: string; checkOutAt?: string; minutes: number; late?: boolean }>;
+  punches: Array<{ _id: string; dateKey: string; checkInAt?: string; checkOutAt?: string; minutes: number; late?: boolean; earlyDeparture?: boolean }>;
   onChanged: () => void;
 }) {
+  const { user } = useAuth();
+  const today = todayKey(user?.studio?.businessTimezone ?? "Asia/Kolkata");
   const cells = monthCells(`${month}-01`);
   const [selected, setSelected] = useState(cells.find((cell) => cell.inMonth)?.key ?? `${month}-01`);
   const [leaveType, setLeaveType] = useState("paid");
@@ -419,12 +457,28 @@ function AttendanceCalendar({ month, onMonth, punches, onChanged }: {
     const off = leave.data?.find((item) => item.status !== "rejected" && item.fromKey <= key && item.toKey >= key);
     const extra = overtime.data?.find((item) => item.dateKey === key && item.status !== "rejected");
     const labels: string[] = [];
-    if (punch) labels.push(punch.late ? "Late" : "Present");
-    else if (off) labels.push(off.status === "approved" ? "Leave" : "Leave pending");
-    else if (holiday) labels.push("Holiday");
-    else if (!workingDays.has(weekday)) labels.push("Week off");
+    let tone: DayTone = "";
+    if (punch?.late || punch?.earlyDeparture) {
+      labels.push(punch.late ? "Late" : "Left early");
+      tone = "late";
+    } else if (punch) {
+      labels.push("Present");
+      tone = "present";
+    } else if (off) {
+      labels.push(off.status === "approved" ? "Leave" : "Leave pending");
+      tone = off.status === "approved" ? "leave" : "pending";
+    } else if (holiday) {
+      labels.push("Holiday");
+      tone = "off";
+    } else if (!workingDays.has(weekday)) {
+      labels.push("Week off");
+      tone = "off";
+    } else if (key < today) {
+      labels.push("Absent");
+      tone = "absent";
+    }
     if (extra) labels.push(extra.status === "approved" ? "OT" : "OT pending");
-    return { labels, holiday, punch, off, extra };
+    return { labels, tone, holiday, punch, off, extra };
   }
   const day = marks(selected, new Date(`${selected}T12:00:00`).getDay());
   const label = new Date(`${month}-01T12:00:00`).toLocaleDateString("en-IN", { month: "long", year: "numeric" });
@@ -442,7 +496,7 @@ function AttendanceCalendar({ month, onMonth, punches, onChanged }: {
         </div>
       </div>
       <div className="mb-3 flex flex-wrap gap-2 text-xs">
-        {["Present", "Late", "Leave", "Week off", "OT"].map((item) => <span key={item} className="border border-line bg-white px-2 py-1">{item}</span>)}
+        {([["present", "Present"], ["late", "Late"], ["absent", "Absent"], ["leave", "Leave"], ["pending", "Waiting"], ["off", "Week off"]] as const).map(([tone, item]) => <span key={tone} className={`swatch swatch-${tone} border border-line bg-white px-2 py-1`}><i />{item}</span>)}
       </div>
       <div className="month-grid border border-line bg-white">
         <div className="grid grid-cols-7 border-b border-line text-[11px] uppercase tracking-[0.14em] text-muted">
@@ -452,9 +506,9 @@ function AttendanceCalendar({ month, onMonth, punches, onChanged }: {
           {cells.map((cell) => {
             const mark = marks(cell.key, cell.weekday);
             return (
-              <button key={cell.key} type="button" aria-label={`${cell.key}, ${mark.labels.join(", ") || "open"}`} className={`relative min-h-24 border-b border-r border-line p-2 text-left ${cell.inMonth ? "bg-white" : "bg-paper text-muted"} ${cell.key === selected ? "shadow-[inset_0_2px_0_#FFD500]" : ""}`} onClick={() => setSelected(cell.key)}>
+              <button key={cell.key} type="button" aria-label={`${cell.key}, ${mark.labels.join(", ") || "open"}`} className={`relative min-h-24 border-b border-r border-line p-2 text-left ${mark.tone && cell.inMonth ? `day-${mark.tone}` : cell.inMonth ? "bg-white" : "bg-paper text-muted"} ${cell.key === selected ? "shadow-[inset_0_2px_0_#FFD500]" : ""}`} onClick={() => setSelected(cell.key)}>
                 <div className="num text-xs">{cell.day}</div>
-                {mark.labels.length ? <span className="month-mark absolute bottom-1 left-1/2 h-1 w-1 -translate-x-1/2 bg-ink" /> : null}
+                {mark.tone ? <span className={`month-mark absolute bottom-1 left-1/2 h-1.5 w-1.5 -translate-x-1/2 swatch-${mark.tone}`}><i className="!m-0 block h-1.5 w-1.5" /></span> : null}
                 <div className="month-detail mt-1 space-y-1">
                   {mark.labels.map((item) => <div key={item} className="truncate text-[11px] font-medium">{item}</div>)}
                 </div>
@@ -466,7 +520,7 @@ function AttendanceCalendar({ month, onMonth, punches, onChanged }: {
       <div className="mt-4 grid gap-4 border border-line bg-white p-4 md:grid-cols-2">
         <div className="text-sm">
           <div className="font-medium">{selected}</div>
-          {day.punch ? <p className="mt-2">In {day.punch.checkInAt ? new Date(day.punch.checkInAt).toLocaleTimeString("en-IN") : "—"} · Out {day.punch.checkOutAt ? new Date(day.punch.checkOutAt).toLocaleTimeString("en-IN") : "—"} · {day.punch.minutes} min{day.punch.late ? " · late" : ""}</p> : null}
+          {day.punch ? <p className={`mt-2 inline-block px-2 py-1 day-${day.tone}`}>In {day.punch.checkInAt ? new Date(day.punch.checkInAt).toLocaleTimeString("en-IN") : "—"} · Out {day.punch.checkOutAt ? new Date(day.punch.checkOutAt).toLocaleTimeString("en-IN") : "—"} · {day.punch.minutes} min{day.punch.late ? " · late" : day.punch.earlyDeparture ? " · left early" : ""}</p> : null}
           {day.off ? <p className="mt-2">{day.off.type} leave · {day.off.status}. {day.off.reason}</p> : null}
           {day.extra ? <p className="mt-2">Overtime {day.extra.minutes} min · {day.extra.status}. {day.extra.reason}</p> : null}
           {day.holiday ? <p className="mt-2">Holiday · {day.holiday.name}</p> : null}
@@ -560,16 +614,14 @@ function downloadPayslip(slip: PayslipRow) {
     <p><strong>${escapeHtml(slip.employeeName || "Employee")}</strong>${slip.employeeCode ? `<br />${escapeHtml(slip.employeeCode)}` : ""}</p>
     <div class="totals">${lines}<div class="total"><span>Net pay</span><span>${escapeHtml(inr(slip.netPaise))}</span></div></div>
     <p class="muted" style="letter-spacing:0;text-transform:none;margin-top:28px">Paid on the 5th of the next month. A Sunday adds one day's pay. Late and early minutes, and a missed working day, come off the monthly salary.</p>
-    <button onclick="print()">Save PDF</button>
+    <button type="button" data-print>Save PDF</button>
   </main></body></html>`;
-  const url = URL.createObjectURL(new Blob([html], { type: "text/html" }));
-  window.open(url, "_blank", "noopener");
-  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  openPrintable(html);
 }
 
 export function PayrollPage() {
   const { can, user } = useAuth();
-  const office = user?.role.systemKey === "super_admin";
+  const office = hasFullAccess(user?.role.systemKey);
   const [monthKey, setMonthKey] = useState(new Date().toISOString().slice(0, 7));
   const [ack, setAck] = useState(false);
   const [message, setMessage] = useState("");

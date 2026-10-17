@@ -81,7 +81,7 @@ export async function loadAuth(userId: string): Promise<AuthContext> {
     roleSlug: role.slug,
     systemKey,
     permissions: role.permissions,
-    isSuperAdmin: systemKey === "super_admin",
+    isSuperAdmin: systemKey === "super_admin" || systemKey === "admin",
     scopeClientIds: (user.scopeClientIds ?? []).map(String),
     scopeProjectIds: (user.scopeProjectIds ?? []).map(String),
     mustChangePassword: user.mustChangePassword,

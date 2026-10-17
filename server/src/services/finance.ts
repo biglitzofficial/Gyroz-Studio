@@ -22,6 +22,29 @@ function totalsFor(lines: LineDraft[], discountPaise: number, taxRateBps: number
   }
 }
 
+async function invoiceCoveringLines(lines: LineDraft[]) {
+  const sourced = lines.filter((line) => line.sourceId && line.sourceType && line.sourceType !== "manual");
+  if (!sourced.length) return null;
+  let found = "";
+  for (const line of sourced) {
+    const clash = await Invoice.findOne({
+      status: { $ne: "void" },
+      lineItems: { $elemMatch: { sourceId: line.sourceId, sourceType: line.sourceType } },
+    }).lean() as any;
+    if (!clash) return null;
+    if (found && found !== String(clash._id)) return null;
+    found = String(clash._id);
+  }
+  return found;
+}
+
+export async function syncInvoicedDeliverables() {
+  const invoices = await Invoice.find({ status: { $nin: ["void", "draft"] } }).select("lineItems").lean() as any[];
+  const ids = invoices.flatMap((invoice) => (invoice.lineItems ?? []).filter((line: { sourceType?: string; sourceId?: string }) => line.sourceType === "deliverable" && line.sourceId).map((line: { sourceId?: string }) => String(line.sourceId)));
+  if (!ids.length) return;
+  await Deliverable.updateMany({ _id: { $in: ids }, billableStatus: { $in: ["eligible", "unbilled"] } }, { billableStatus: "invoiced" });
+}
+
 async function assertBillableSources(lines: LineDraft[], invoiceId?: string) {
   for (const line of lines) {
     if (!line.sourceId || line.sourceType === "manual" || !line.sourceType) continue;
@@ -103,6 +126,13 @@ async function writeInvoice(auth: AuthContext, id: string | undefined, input: { 
   const taxRateBps = input.taxRateBps ?? settings.defaultTaxRateBps ?? 0;
   const normalizedLines = input.lineItems.map((line) => ({ ...line, discountPaise: line.discountPaise ?? 0 }));
   const totals = totalsFor(normalizedLines, discountPaise, taxRateBps);
+  if (!id) {
+    const covered = await invoiceCoveringLines(normalizedLines);
+    if (covered) {
+      await syncInvoicedDeliverables();
+      return getInvoice(auth, covered);
+    }
+  }
   await assertBillableSources(normalizedLines, id);
   const lineItems = totals.lines.map((line, index) => ({
     description: line.description,
@@ -273,6 +303,7 @@ export async function submitInvoice(auth: AuthContext, id: string) {
   if (!invoice.lineItems.length) throw new AppError(400, "VALIDATION", "Add a line before submitting.");
   invoice.status = "pending_approval";
   await invoice.save();
+  await syncInvoicedDeliverables();
   return getInvoice(auth, id);
 }
 
@@ -389,12 +420,11 @@ export async function createExpense(auth: AuthContext, input: Record<string, unk
 export async function decideExpense(auth: AuthContext, id: string, status: "approved" | "rejected") {
   const expense = await Expense.findById(id);
   if (!expense) throw new AppError(404, "NOT_FOUND", "Expense not found.");
-  if (auth.systemKey === "admin") {
-    if (expense.status !== "pending") throw new AppError(409, "CONFLICT", "This expense is not waiting for an admin.");
+  if (auth.systemKey === "admin" && expense.status === "pending") {
     if (status === "approved") {
       expense.status = "admin_approved";
       expense.adminApprovedBy = auth.userId as unknown as typeof expense.adminApprovedBy;
-      await notify(await userIdsForSystemKey("super_admin"), {
+      await notify([...(await userIdsForSystemKey("admin")), ...(await userIdsForSystemKey("super_admin"))], {
         type: "expense.admin_approved",
         title: "Expense waiting for final approval",
         body: expense.description,

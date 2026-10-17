@@ -3,10 +3,10 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { Capacitor } from "@capacitor/core";
 import { usePhoneTables } from "@/components/phone-tables";
 import {
-  Banknote, Bell, CalendarDays, Camera, Clapperboard, Clock, LayoutDashboard, LineChart, LogOut, Menu, NotebookText, QrCode,
+  Banknote, Bell, CalendarDays, Camera, Clapperboard, Clock, LayoutDashboard, LineChart, ListChecks, LogOut, Menu, NotebookText, Package, QrCode,
   Receipt, ScrollText, Search, Send, Settings, Shield, Users, Wallet, X,
 } from "lucide-react";
-import { useAuth } from "@/lib/auth";
+import { hasFullAccess, useAuth } from "@/lib/auth";
 import { withWork } from "@/lib/feedback";
 import { api } from "@/lib/api";
 import { useQuery } from "@tanstack/react-query";
@@ -19,6 +19,7 @@ const NAV = [
     { to: "/clients", label: "Clients", icon: Clapperboard, permission: "clients.view" },
     { to: "/projects", label: "Projects", icon: Clapperboard, permission: "projects.view" },
     { to: "/shoots", label: "Shoots", icon: Camera, permission: "shoots.view" },
+    { to: "/assets", label: "Assets", icon: Package, super: true },
     { to: "/calendar", label: "Calendar", icon: CalendarDays, permission: "plans.view" },
     { to: "/editing", label: "Editing", icon: Clapperboard, permission: "editing.view" },
     { to: "/reshoots", label: "Reshoots", icon: Camera, permission: "reshoots.view" },
@@ -34,6 +35,7 @@ const NAV = [
     { to: "/hrms", label: "HRMS", icon: Clock, super: true },
     { to: "/employees", label: "People", icon: Users, permission: "employees.view" },
     { to: "/attendance", label: "Attendance", icon: QrCode, any: ["attendance.view", "attendance.self"] },
+    { to: "/work", label: "Work", icon: ListChecks, always: true },
     { to: "/payroll", label: "Payroll", icon: Banknote, always: true },
   ]},
   { section: "System", items: [
@@ -59,7 +61,7 @@ export function Shell() {
   const unread = notes.data?.filter((item) => !item.readAt).length ?? 0;
   const sections = useMemo(() => NAV.map((section) => ({
     ...section,
-    items: section.items.filter((item) => ("super" in item && item.super) ? user?.role.systemKey === "super_admin" : ("always" in item && item.always) || (item.permission ? can(item.permission) : item.any?.some((key) => can(key)))),
+    items: section.items.filter((item) => ("super" in item && item.super) ? hasFullAccess(user?.role.systemKey) : ("always" in item && item.always) || (item.permission ? can(item.permission) : item.any?.some((key) => can(key)))),
   })).filter((section) => section.items.length), [can, user]);
 
   useEffect(() => { localStorage.setItem("gyroz-nav", collapsed ? "collapsed" : "open"); }, [collapsed]);

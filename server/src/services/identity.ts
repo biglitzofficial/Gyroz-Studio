@@ -42,12 +42,12 @@ export const profileSchema = z.object({
 
 export async function bootstrap() {
   for (const template of roleTemplates()) {
-    if (template.systemKey === "super_admin") {
+    if (template.systemKey === "super_admin" || template.systemKey === "admin") {
       await Role.updateOne(
-        { systemKey: "super_admin" },
+        { systemKey: template.systemKey },
         {
           $set: { permissions: allPermissionKeys(), name: template.name, description: template.description, protected: true },
-          $setOnInsert: { slug: template.slug, systemKey: "super_admin" },
+          $setOnInsert: { slug: template.slug, systemKey: template.systemKey },
         },
         { upsert: true },
       );
@@ -121,7 +121,8 @@ export async function refresh(token: string | undefined, res: Response) {
   const hash = hashToken(token);
   const user = await User.findOne({ "refreshTokens.hash": hash, status: "active" });
   const stored = user?.refreshTokens.find((item: { hash: string; expiresAt: Date }) => item.hash === hash);
-  if (!user || !stored || stored.expiresAt.getTime() < Date.now()) {
+  const expiresAt = stored?.expiresAt instanceof Date ? stored.expiresAt.getTime() : new Date(stored?.expiresAt ?? 0).getTime();
+  if (!user || !stored || !Number.isFinite(expiresAt) || expiresAt < Date.now()) {
     throw new AppError(401, "UNAUTHORIZED", "Session expired. Sign in again.");
   }
   await User.updateOne({ _id: user._id }, { $pull: { refreshTokens: { hash } } });
@@ -180,18 +181,11 @@ export async function saveRole(auth: AuthContext, input: { id?: string; name: st
   if (existingId) {
     const role = await Role.findById(existingId);
     if (!role) throw new AppError(404, "NOT_FOUND", "Role not found.");
-    if (role.systemKey === "super_admin") throw new AppError(403, "FORBIDDEN", "The super admin role cannot be modified.");
+    if (role.systemKey === "super_admin" || role.systemKey === "admin") throw new AppError(403, "FORBIDDEN", "This role always has full access and cannot be modified.");
     const before = { name: role.name, permissions: role.permissions };
     role.name = input.name;
     role.description = input.description ?? role.description;
-    if (role.systemKey !== "admin") role.permissions = permissions;
-    if (role.systemKey === "admin") {
-      const blocked = ["roles.manage", "settings.manage"];
-      if (permissions.some((key) => blocked.includes(key)) && !auth.isSuperAdmin) {
-        throw new AppError(403, "FORBIDDEN", "Those permissions cannot be granted.");
-      }
-      role.permissions = permissions.filter((key) => key !== "roles.manage");
-    }
+    role.permissions = permissions;
     await role.save();
     await audit({ actorId: auth.userId, action: "role.updated", entityType: "role", entityId: String(role._id), before, after: { name: role.name, permissions: role.permissions } });
     return listRoles();

@@ -3,10 +3,9 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Link, Navigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
-import { errorMessage, useStudio } from "@/lib/api";
+import { errorMessage } from "@/lib/api";
 import { withWork } from "@/lib/feedback";
-import { isApp, studioAddress } from "@/lib/studio";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ArrowRight, Crown, Eye, EyeOff, Lock, Mail, Shield } from "lucide-react";
 import hero from "@/assets/gyroz-staff-bg.png";
 import owner from "@/assets/gyroz-admin-bg.png";
@@ -19,12 +18,9 @@ const schema = z.object({
 export function LoginPage() {
   const { user, login } = useAuth();
   const [formError, setFormError] = useState("");
-  const [studio, setStudio] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [resetNote, setResetNote] = useState(false);
-  const app = isApp();
   const form = useForm<z.infer<typeof schema>>({ resolver: zodResolver(schema), defaultValues: { email: "", password: "" } });
-  useEffect(() => { if (app) void studioAddress().then(setStudio); }, [app]);
   if (user) return <Navigate to="/" replace />;
   return (
     <div className="safe-pad relative min-h-screen overflow-hidden bg-ink text-white lg:h-screen">
@@ -35,7 +31,6 @@ export function LoginPage() {
             setFormError("");
             try {
               await withWork("Signing in", async () => {
-                if (app) await useStudio(studio);
                 await login(values.email, values.password, (signedIn) => signedIn.role.systemKey === "super_admin" ? "This account cannot sign in here." : true);
               });
             } catch (error) { setFormError(error instanceof Error && !("isAxiosError" in error) ? error.message : errorMessage(error)); }
@@ -43,12 +38,6 @@ export function LoginPage() {
             <div className="text-center text-[11px] font-medium uppercase tracking-[0.22em] text-white/55">Welcome to</div>
             <h1 className="mt-2 text-center text-[28px] font-semibold tracking-tight">Gyroz Studio</h1>
             <p className="mt-2 text-center text-sm text-white/60">Sign in to access your studio workspace.</p>
-            {app ? (
-              <label className="mt-6 block text-sm">
-                <span className="text-white/80">Studio address</span>
-                <input className="mt-2 h-11 w-full rounded-lg border border-white/15 bg-transparent px-3 text-sm outline-none placeholder:text-white/35 focus:border-accent" inputMode="url" autoCapitalize="off" autoCorrect="off" placeholder="http://192.168.1.20:4000" value={studio} onChange={(event) => setStudio(event.target.value)} />
-              </label>
-            ) : null}
             <label className="mt-6 block text-sm">
               <span className="text-white/80">Email</span>
               <span className="relative mt-2 block">
@@ -92,12 +81,9 @@ export function LoginPage() {
 export function AdminLoginPage() {
   const { user, login } = useAuth();
   const [formError, setFormError] = useState("");
-  const [studio, setStudio] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [resetNote, setResetNote] = useState(false);
-  const app = isApp();
   const form = useForm<z.infer<typeof schema>>({ resolver: zodResolver(schema), defaultValues: { email: "", password: "" } });
-  useEffect(() => { if (app) void studioAddress().then(setStudio); }, [app]);
   if (user?.role.systemKey === "super_admin") return <Navigate to="/" replace />;
   return (
     <div className="safe-pad relative min-h-screen overflow-hidden bg-[#100e0c] text-white lg:h-screen">
@@ -108,7 +94,6 @@ export function AdminLoginPage() {
             setFormError("");
             try {
               await withWork("Signing in", async () => {
-                if (app) await useStudio(studio);
                 await login(values.email, values.password, (signedIn) => signedIn.role.systemKey === "super_admin" ? true : "This entrance is only for the super admin.");
               });
             } catch (error) { setFormError(error instanceof Error && !("isAxiosError" in error) ? error.message : errorMessage(error)); }
@@ -122,12 +107,6 @@ export function AdminLoginPage() {
             </div>
             <h1 className="mt-5 text-[30px] font-semibold leading-tight">Your studio.<br />Your vision.</h1>
             <p className="mt-2 text-sm text-white/60">Sign in to access the command center. Manage the team, projects, finances, and the studio.</p>
-            {app ? (
-              <label className="mt-5 block text-sm">
-                <span>Studio address</span>
-                <input className="mt-2 h-11 w-full rounded-lg border border-white/15 bg-black/30 px-3 text-sm outline-none placeholder:text-white/35 focus:border-[#e0c36a]" inputMode="url" autoCapitalize="off" autoCorrect="off" placeholder="http://192.168.1.20:4000" value={studio} onChange={(event) => setStudio(event.target.value)} />
-              </label>
-            ) : null}
             <label className="mt-4 block text-sm">
               <span>Email address</span>
               <span className="relative mt-2 block">

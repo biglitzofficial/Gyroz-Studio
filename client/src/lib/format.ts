@@ -49,10 +49,10 @@ export function elapsed(minutes?: number | null) {
   return `${hours}h ${rest}m`;
 }
 
-const SUCCESS = new Set(["paid", "published", "approved", "completed", "present", "finalized", "client_approved", "internal_approved", "active", "eligible"]);
-const DANGER = new Set(["overdue", "failed", "rejected", "cancelled", "void", "rework", "absent", "disabled"]);
-const WARNING = new Set(["on_hold", "pending_approval", "partially_paid", "late", "submitted", "pending", "admin_approved", "paused", "preview", "draft"]);
-const ACCENT = new Set(["in_progress", "in_production", "claimed", "scheduled", "ready_to_publish", "in_post", "ready", "available"]);
+const SUCCESS = new Set(["paid", "published", "approved", "completed", "present", "finalized", "client_approved", "internal_approved", "active", "eligible", "good", "new"]);
+const DANGER = new Set(["overdue", "failed", "rejected", "cancelled", "void", "rework", "absent", "disabled", "damaged", "lost", "poor"]);
+const WARNING = new Set(["on_hold", "pending_approval", "partially_paid", "late", "submitted", "pending", "admin_approved", "paused", "preview", "draft", "in_repair", "fair"]);
+const ACCENT = new Set(["in_progress", "in_production", "claimed", "scheduled", "ready_to_publish", "in_post", "ready", "available", "assigned"]);
 
 export function statusTone(status?: string | null) {
   if (!status) return "neutral";

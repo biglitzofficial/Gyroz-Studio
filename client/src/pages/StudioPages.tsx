@@ -5,6 +5,7 @@ import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { api, errorMessage } from "@/lib/api";
+import { PunchRequired, useOpenPunch } from "@/lib/punch";
 import { inr, rupeesToPaise } from "@/lib/format";
 import { Button, Empty, Field, LoadingRows, PageHeader, SaveAction, Select, Status, TextArea, TextInput, Timeline } from "@/components/ui";
 import { useAuth } from "@/lib/auth";
@@ -213,6 +214,7 @@ const shootSchema = z.object({
 
 export function ShootsPage() {
   const { can } = useAuth();
+  const punch = useOpenPunch();
   const mineOnly = can("shoots.log") && !can("shoots.create");
   const [open, setOpen] = useState(false);
   const [message, setMessage] = useState("");
@@ -232,7 +234,8 @@ export function ShootsPage() {
   });
   return (
     <div>
-      <PageHeader eyebrow="Floor" title={mineOnly ? "Your shoots" : "Shoots"} text={mineOnly ? "An admin assigns the shoot. You log where you went, how long it took, what happened, and any money spent. Then you hand the footage to editing." : "Schedule the shoot for a cinematographer. The field report, time, and expenses are entered on their login."} actions={can("shoots.create") ? <Button onClick={() => setOpen((v) => !v)}>Schedule shoot</Button> : null} />
+      <PageHeader eyebrow="Floor" title={mineOnly ? "Your shoots" : "Shoots"} text={mineOnly ? "An admin assigns the shoot. After you punch in, you log where you went, how long it took, what happened, and any money spent. Punching out locks the report." : "Schedule the shoot for a cinematographer. They log the field report only while they are punched in."} actions={can("shoots.create") ? <Button onClick={() => setOpen((v) => !v)}>Schedule shoot</Button> : null} />
+      {mineOnly ? <PunchRequired /> : null}
       {message ? <p className="mb-3 text-sm">{message}</p> : null}
       {open ? (
         <form className="mb-6 grid gap-3 border border-line bg-white p-4 md:grid-cols-2" onSubmit={form.handleSubmit((values) => save.mutate(values))}>
@@ -247,13 +250,13 @@ export function ShootsPage() {
       ) : null}
       {mineOnly ? (
         <div className="space-y-4">
-          {(shoots.data ?? []).length ? (shoots.data ?? []).map((shoot: FieldShoot) => <FieldReport key={shoot._id} shoot={shoot} />) : <Empty title="No shoot is assigned to you" text="When an admin puts you on a shoot, the report form appears here." />}
+          {(shoots.data ?? []).length ? (shoots.data ?? []).map((shoot: FieldShoot) => <FieldReport key={shoot._id} shoot={shoot} locked={!punch.open} />) : <Empty title="No shoot is assigned to you" text="When an admin puts you on a shoot, it appears here. The report opens after you punch in." />}
         </div>
       ) : (
       <div className="table-wrap"><table className="data"><thead><tr><th>Code</th><th>Client</th><th>When</th><th>Location</th><th>Status</th><th></th></tr></thead><tbody>
-        {(shoots.data ?? []).map((shoot: { _id: string; shootCode: string; clientName?: string; projectName?: string; scheduledDate: string; plannedStart?: string; plannedEnd?: string; location?: string; status: string; hoursSpent?: number }) => (
+        {(shoots.data ?? []).map((shoot: { _id: string; shootCode: string; clientName?: string; projectName?: string; scheduledDate: string; plannedStart?: string; plannedEnd?: string; location?: string; status: string; hoursSpent?: number; reshootCode?: string; reshootTitle?: string }) => (
           <tr key={shoot._id}>
-            <td className="num">{shoot.shootCode}<div className="text-xs text-muted">{shoot.projectName}</div></td>
+            <td className="num">{shoot.shootCode}{shoot.reshootCode ? ` · reshoot` : ""}<div className="text-xs text-muted">{shoot.reshootTitle || shoot.projectName}</div></td>
             <td>{shoot.clientName || "—"}</td>
             <td>{shoot.scheduledDate}<div className="text-xs text-muted">{shoot.plannedStart || "—"}–{shoot.plannedEnd || "—"}</div></td>
             <td>{shoot.location || "—"}</td>
@@ -280,10 +283,13 @@ type FieldShoot = {
   status: string;
   hoursSpent?: number;
   report?: string;
+  reshootRequestId?: string;
+  reshootCode?: string;
+  reshootTitle?: string;
   expenses?: FieldExpense[];
 };
 
-function FieldReport({ shoot }: { shoot: FieldShoot }) {
+function FieldReport({ shoot, locked }: { shoot: FieldShoot; locked: boolean }) {
   const queryClient = useQueryClient();
   const [location, setLocation] = useState(shoot.location ?? "");
   const [hours, setHours] = useState(shoot.hoursSpent ? String(shoot.hoursSpent) : "");
@@ -295,6 +301,7 @@ function FieldReport({ shoot }: { shoot: FieldShoot }) {
   const [reportDirty, setReportDirty] = useState(false);
   const [reportKept, setReportKept] = useState(Boolean(shoot.report));
   const open = shoot.status === "scheduled" || shoot.status === "in_progress";
+  const reshoot = Boolean(shoot.reshootRequestId);
   const save = useMutation({
     meta: { loading: "Saving the report", toast: "Report saved." },
     mutationFn: async () => {
@@ -314,7 +321,10 @@ function FieldReport({ shoot }: { shoot: FieldShoot }) {
   });
   const submit = useMutation({
     meta: { loading: "Sending to editors", toast: "Sent to editors." },
-    mutationFn: async () => api.post(`/shoots/${shoot._id}/submit`, {
+    mutationFn: async () => api.post(`/shoots/${shoot._id}/submit`, reshoot ? {
+      usableFootageCount: 1,
+      notes: report.trim(),
+    } : {
       usableFootageCount: outputs.split("\n").map((title) => title.trim()).filter(Boolean).length,
       notes: report.trim(),
       outputs: outputs.split("\n").map((title) => title.trim()).filter(Boolean).map((title) => ({ title, type: "promotional_video" })),
@@ -326,16 +336,18 @@ function FieldReport({ shoot }: { shoot: FieldShoot }) {
     <section className="border border-line bg-white p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="text-xs uppercase tracking-[0.12em] text-muted">{shoot.shootCode} · {shoot.scheduledDate} · {shoot.plannedStart || "—"}–{shoot.plannedEnd || "—"}</div>
+          <div className="text-xs uppercase tracking-[0.12em] text-muted">{shoot.shootCode}{shoot.reshootCode ? ` · ${shoot.reshootCode}` : ""} · {shoot.scheduledDate} · {shoot.plannedStart || "—"}–{shoot.plannedEnd || "—"}</div>
           <h2 className="mt-1 font-medium">{shoot.clientName || "Client"} · {shoot.projectName || "Project"}</h2>
+          {reshoot ? <p className="mt-1 text-sm text-muted">Reshoot{shoot.reshootTitle ? ` of ${shoot.reshootTitle}` : ""}. Log where you went and what you re-shot. Sending it back puts the same video into editing again.</p> : null}
         </div>
         <Status value={shoot.status} />
       </div>
-      {open ? (
+      {open && locked ? <p className="mt-3 text-sm text-muted">This shoot is assigned to you. The report stays closed until you are punched in.</p> : null}
+      {open && !locked ? (
         <form className="mt-4 grid gap-3 md:grid-cols-2" onChange={() => setReportDirty(true)} onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
           <Field label="Location you went"><TextInput maxLength={120} value={location} onChange={(event) => setLocation(event.target.value)} placeholder="Where the shoot happened" /></Field>
           <Field label="Hours it took"><TextInput inputMode="decimal" value={hours} onChange={(event) => setHours(event.target.value)} placeholder="6.5" /></Field>
-          <div className="md:col-span-2"><Field label="Report"><TextArea maxLength={500} value={report} onChange={(event) => setReport(event.target.value)} placeholder="What was shot, what is usable, and anything that blocked you." /></Field></div>
+          <div className="md:col-span-2"><Field label="Report"><TextArea maxLength={500} value={report} onChange={(event) => setReport(event.target.value)} placeholder={reshoot ? "What you re-shot, what is usable, and anything that blocked you." : "What was shot, what is usable, and anything that blocked you."} /></Field></div>
           <div className="md:col-span-2 space-y-2">
             <div className="text-sm font-medium">Expenses on this shoot</div>
             {expenses.map((item, index) => (
@@ -355,7 +367,7 @@ function FieldReport({ shoot }: { shoot: FieldShoot }) {
           </div>
           <div className="flex flex-wrap gap-2 md:col-span-2">
             <SaveAction changed={reportDirty} stored={reportKept} pending={save.isPending} label="Save report" />
-            <Button type="button" variant="ghost" onClick={() => { if (!shoot.report) { setMessage("Save the report before handing the footage to editing."); return; } setHandOff(true); }}>Hand to editing</Button>
+            <Button type="button" variant="ghost" onClick={() => { if (!shoot.report) { setMessage("Save the report before handing the footage to editing."); return; } if (reshoot) { submit.mutate(); return; } setHandOff(true); }}>{reshoot ? "Send rework to editing" : "Hand to editing"}</Button>
           </div>
         </form>
       ) : <p className="mt-3 text-sm text-muted">{shoot.hoursSpent ? `${shoot.hoursSpent}h` : "Time not logged"}{shoot.location ? ` · ${shoot.location}` : ""}. {shoot.report || "No report."}</p>}

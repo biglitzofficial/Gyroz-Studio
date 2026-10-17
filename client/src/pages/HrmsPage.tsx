@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, errorMessage } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
+import { hasFullAccess, useAuth } from "@/lib/auth";
 import { inr, paiseToRupees, rupeesToPaise, todayKey } from "@/lib/format";
+import { OfficeMap } from "@/components/OfficeMap";
 import { Button, Field, LoadingRows, Notice, PageHeader, SavedMark, Select, TextInput } from "@/components/ui";
 
 type Shift = { _id: string; name: string; startTime: string; endTime: string; graceMinutes: number; workingDays?: number[] };
@@ -72,7 +73,7 @@ function clock(value?: string, zone = "Asia/Kolkata") {
 
 export function HrmsPage() {
   const { user } = useAuth();
-  const office = user?.role.systemKey === "super_admin";
+  const office = hasFullAccess(user?.role.systemKey);
   const zone = user?.studio?.businessTimezone ?? "Asia/Kolkata";
   const queryClient = useQueryClient();
   const [message, setMessage] = useState("");
@@ -92,7 +93,9 @@ export function HrmsPage() {
   const [ratesStamp, setRatesStamp] = useState("");
   const [radius, setRadius] = useState("100");
   const [policy, setPolicy] = useState("reject");
-  const [officeSaved, setOfficeSaved] = useState(false);
+  const [officeLat, setOfficeLat] = useState<number | null>(null);
+  const [officeLng, setOfficeLng] = useState<number | null>(null);
+  const [officeReady, setOfficeReady] = useState(false);
   const [screenKey, setScreenKey] = useState("");
 
   const shifts = useQuery({ queryKey: ["shifts"], queryFn: async () => (await api.get("/shifts")).data.data as Shift[], enabled: office });
@@ -109,13 +112,16 @@ export function HrmsPage() {
     setDays(shift.workingDays ?? [1, 2, 3, 4, 5, 6]);
   }, [shift]);
   useEffect(() => {
-    const payroll = settings.data?.payroll;
-    if (!payroll) return;
-    setOvertime(payroll.overtimePaisePerHour ? String(payroll.overtimePaisePerHour / 100) : "");
+    if (!settings.data) return;
+    const payroll = settings.data.payroll;
+    if (payroll) setOvertime(payroll.overtimePaisePerHour ? String(payroll.overtimePaisePerHour / 100) : "");
+    if (officeReady) return;
     setRadius(String(settings.data.officeRadiusMeters ?? 100));
     setPolicy(settings.data.officeLocationPolicy === "flag" ? "flag" : "reject");
-    setOfficeSaved(settings.data.officeLatitude != null && settings.data.officeLongitude != null);
-  }, [settings.data]);
+    setOfficeLat(typeof settings.data.officeLatitude === "number" ? settings.data.officeLatitude : null);
+    setOfficeLng(typeof settings.data.officeLongitude === "number" ? settings.data.officeLongitude : null);
+    setOfficeReady(true);
+  }, [settings.data, officeReady]);
 
   const saveShift = useMutation({
     meta: { loading: "Saving hours", toast: "Hours saved." },
@@ -137,14 +143,11 @@ export function HrmsPage() {
     meta: { loading: "Saving the office pin", toast: "Office pin saved." },
     mutationFn: async () => {
       const meters = Number(radius);
+      if (officeLat == null || officeLng == null) throw new Error("Place the office on the map.");
       if (!Number.isInteger(meters) || meters < 30 || meters > 500) throw new Error("Use a radius from 30 to 500 metres.");
-      const position = await new Promise<GeolocationPosition>((resolve, reject) => {
-        if (!navigator.geolocation) { reject(new Error("This browser cannot read location.")); return; }
-        navigator.geolocation.getCurrentPosition(resolve, () => reject(new Error("Allow location while you are standing in the studio.")), { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 });
-      });
-      return api.put("/settings", { officeLatitude: position.coords.latitude, officeLongitude: position.coords.longitude, officeRadiusMeters: meters, officeLocationPolicy: policy });
+      return api.put("/settings", { officeLatitude: officeLat, officeLongitude: officeLng, officeRadiusMeters: meters, officeLocationPolicy: policy });
     },
-    onSuccess: () => { setMessage(""); setOfficeSaved(true); queryClient.invalidateQueries({ queryKey: ["settings"] }); },
+    onSuccess: () => { setMessage(""); queryClient.invalidateQueries({ queryKey: ["settings"] }); },
     onError: (error) => setMessage(error instanceof Error && !("isAxiosError" in error) ? error.message : errorMessage(error)),
   });
   const savePay = useMutation({
@@ -175,8 +178,8 @@ export function HrmsPage() {
   if (!office) {
     return (
       <div className="max-w-xl">
-        <PageHeader eyebrow="People" title="HRMS" text="Shift hours, allocation, and attendance corrections stay with the super admin." />
-        <Notice tone="danger">Only a super admin can open HRMS.</Notice>
+        <PageHeader eyebrow="People" title="HRMS" text="Shift hours, allocation, and attendance corrections stay with an admin." />
+        <Notice tone="danger">Only an admin can open HRMS.</Notice>
       </div>
     );
   }
@@ -189,6 +192,14 @@ export function HrmsPage() {
   const ratesNow = overtime;
   const ratesBase = ratesStamp || (settings.data ? storedOvertime : "");
   const ratesDirty = Boolean(settings.data) && ratesNow !== ratesBase;
+  const savedLat = typeof settings.data?.officeLatitude === "number" ? settings.data.officeLatitude : null;
+  const savedLng = typeof settings.data?.officeLongitude === "number" ? settings.data.officeLongitude : null;
+  const officeDirty = officeReady && (
+    officeLat !== savedLat
+    || officeLng !== savedLng
+    || radius !== String(settings.data?.officeRadiusMeters ?? 100)
+    || policy !== (settings.data?.officeLocationPolicy === "flag" ? "flag" : "reject")
+  );
 
   return (
     <div>
@@ -217,22 +228,16 @@ export function HrmsPage() {
       <section className="mb-6 border border-line bg-white">
         <h2 className="border-b border-line px-4 py-3 font-medium">Office area</h2>
         <div className="grid gap-3 p-4 sm:grid-cols-3">
-          <Field label="Radius in metres" hint="A punch farther than this is outside the studio."><TextInput inputMode="numeric" value={radius} onChange={(event) => { setRadius(event.target.value); setOfficeSaved(false); }} /></Field>
-          <Field label="Outside the area"><Select value={policy} onChange={(event) => { setPolicy(event.target.value); setOfficeSaved(false); }}><option value="reject">Reject the punch</option><option value="flag">Allow it and flag it</option></Select></Field>
-          <div className="flex items-end">{officeSaved ? <SavedMark /> : <Button onClick={() => saveOffice.mutate()} disabled={saveOffice.isPending}>{saveOffice.isPending ? "Saving" : "Mark this place as the office"}</Button>}</div>
+          <Field label="Radius in metres" hint="A punch farther than this is outside the studio. GPS may be off by up to 40 metres and still counts."><TextInput inputMode="numeric" value={radius} onChange={(event) => setRadius(event.target.value)} /></Field>
+          <Field label="Outside the area"><Select value={policy} onChange={(event) => setPolicy(event.target.value)}><option value="reject">Reject the punch</option><option value="flag">Allow it and flag it</option></Select></Field>
+          <div className="flex items-end">{officeDirty ? <Button onClick={() => saveOffice.mutate()} disabled={saveOffice.isPending}>{saveOffice.isPending ? "Saving" : "Save office area"}</Button> : officeLat != null && officeLng != null ? <SavedMark /> : null}</div>
         </div>
-        <p className="px-4 pb-4 text-sm text-muted">Stand in the studio, then mark this place. Phones must be inside the radius when they scan the reception QR.</p>
+        <OfficeMap latitude={officeLat} longitude={officeLng} radius={Number(radius) || 100} onMove={(pin) => { setOfficeLat(pin.latitude); setOfficeLng(pin.longitude); }} />
         <div className="border-t border-line px-4 py-4">
           <h3 className="font-medium">Office screen</h3>
           <p className="mt-1 text-sm text-muted">This link shows only the QR code. It cannot open payroll, people, or settings. Open it on the reception computer and leave it there. A new link turns the previous one off.</p>
           <div className="mt-3"><Button onClick={() => screenLink.mutate()} disabled={screenLink.isPending}>{screenLink.isPending ? "Saving" : screenKey ? "Create a new link" : "Create office link"}</Button></div>
-          {(settings.data?.phoneHosts ?? []).length ? (
-            <div className="mt-4">
-              <div className="text-sm font-medium">Phone app</div>
-              <p className="mt-1 text-sm text-muted">On each phone, open Gyroz and enter this address. The phone stays on the same Wi-Fi as this computer.</p>
-              {(settings.data.phoneHosts as string[]).map((host) => <TextInput key={host} className="mt-2" readOnly value={host} aria-label="Phone app address" onFocus={(event) => event.currentTarget.select()} />)}
-            </div>
-          ) : null}
+          <p className="mt-3 text-sm text-muted">The phone app already opens the live studio. Staff sign in and scan the QR on this screen while they are inside the yellow circle.</p>
           {screenKey ? <TextInput className="mt-3" readOnly value={`${window.location.origin}/reception?key=${screenKey}`} aria-label="Office screen link" onFocus={(event) => event.currentTarget.select()} /> : null}
         </div>
       </section>

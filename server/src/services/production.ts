@@ -2,15 +2,22 @@ import { assertClientAccess, scopeFilter, type AuthContext } from "../auth";
 import { withTransaction } from "../db";
 import { AppError, escapeRegex, pageParams } from "../http";
 import { Client, Deliverable, EditingTask, Expense, Project, PublishingTask, Reshoot, Review, Shoot, TaskHistory, User } from "../models";
+import { businessDateKey } from "../domain/dates";
 import { allowedProjectTransitions, type ProjectStatus } from "../domain/workflow";
-import { activity, audit, nextCode, notify, recipientIds, userIdsForSystemKey } from "../platform";
-import { draftInvoiceForPublished } from "./finance";
-import { assertAssignable } from "./people";
+import { activity, audit, nextCode, notify, recipientIds, studioTimezone, userIdsForSystemKey } from "../platform";
+import { draftInvoiceForPublished, syncInvoicedDeliverables } from "./finance";
+import { assertAssignable, assertPunchedIn } from "./people";
 
 type Ref = { label?: string; url?: string };
 
 function sessionOpts(session: unknown) {
   return session ? { session } : {};
+}
+
+async function assertWorkerPresent(auth: AuthContext, assigned: boolean, officePermission: string) {
+  if (auth.isSuperAdmin) return;
+  if (!assigned && auth.permissions.includes(officePermission)) return;
+  await assertPunchedIn(auth);
 }
 
 async function names(ids: Array<unknown>) {
@@ -34,25 +41,36 @@ export async function listShoots(auth: AuthContext, query: Record<string, unknow
     Shoot.find(filter).sort({ scheduledDate: 1 }).skip(skip).limit(limit).lean() as any,
     Shoot.countDocuments(filter),
   ]);
-  const [clients, projects, expenses] = await Promise.all([
+  const reshootIds = rows.map((row) => row.reshootRequestId).filter(Boolean);
+  const reshoots = await Reshoot.find({ _id: { $in: reshootIds } }).select("reshootCode deliverableId").lean() as any[];
+  const [clients, projects, expenses, deliverables] = await Promise.all([
     Client.find({ _id: { $in: rows.map((row) => row.clientId) } }).select("name").lean() as any,
     Project.find({ _id: { $in: rows.map((row) => row.projectId) } }).select("name").lean() as any,
     Expense.find({ shootId: { $in: rows.map((row) => row._id) } }).select("shootId category description amountPaise status").lean() as any,
+    Deliverable.find({ _id: { $in: reshoots.map((item) => item.deliverableId).filter(Boolean) } }).select("title deliverableCode").lean() as any,
   ]);
   const clientName = new Map(clients.map((item) => [String(item._id), item.name]));
   const projectName = new Map(projects.map((item) => [String(item._id), item.name]));
+  const reshootById = new Map(reshoots.map((item) => [String(item._id), item]));
+  const deliverableById = new Map(deliverables.map((item) => [String(item._id), item]));
   const expensesByShoot = new Map<string, any[]>();
   for (const expense of expenses) {
     const key = String(expense.shootId);
     expensesByShoot.set(key, [...(expensesByShoot.get(key) ?? []), expense]);
   }
   return {
-    rows: rows.map((row) => ({
-      ...row,
-      clientName: clientName.get(String(row.clientId)) ?? "",
-      projectName: projectName.get(String(row.projectId)) ?? "",
-      expenses: expensesByShoot.get(String(row._id)) ?? [],
-    })),
+    rows: rows.map((row) => {
+      const reshoot = reshootById.get(String(row.reshootRequestId));
+      const deliverable = reshoot ? deliverableById.get(String(reshoot.deliverableId)) : undefined;
+      return {
+        ...row,
+        clientName: clientName.get(String(row.clientId)) ?? "",
+        projectName: projectName.get(String(row.projectId)) ?? "",
+        expenses: expensesByShoot.get(String(row._id)) ?? [],
+        reshootCode: reshoot?.reshootCode ?? "",
+        reshootTitle: deliverable ? `${(deliverable as { deliverableCode?: string; title?: string }).deliverableCode} · ${(deliverable as { title?: string }).title}` : "",
+      };
+    }),
     meta: { page, limit, total },
   };
 }
@@ -101,6 +119,7 @@ export async function startShoot(auth: AuthContext, id: string) {
   if (!assigned && !auth.permissions.includes("shoots.edit") && !auth.isSuperAdmin) {
     throw new AppError(403, "FORBIDDEN", "Only the assigned cinematographer can start this shoot.");
   }
+  await assertWorkerPresent(auth, Boolean(assigned), "shoots.edit");
   if (shoot.status !== "scheduled") throw new AppError(409, "CONFLICT", "Only a scheduled shoot can be started.");
   shoot.status = "in_progress";
   shoot.actualStart = new Date();
@@ -118,6 +137,7 @@ export async function logShootProgress(auth: AuthContext, id: string, input: { n
   if (!assigned && !auth.isSuperAdmin && !auth.permissions.includes("shoots.edit")) {
     throw new AppError(403, "FORBIDDEN", "Only the assigned cinematographer can update this shoot.");
   }
+  await assertWorkerPresent(auth, Boolean(assigned), "shoots.edit");
   if (!["scheduled", "in_progress"].includes(shoot.status)) throw new AppError(409, "CONFLICT", "This shoot is already handed to editing.");
   if (shoot.status === "scheduled") {
     shoot.status = "in_progress";
@@ -139,6 +159,7 @@ export async function saveFieldReport(auth: AuthContext, id: string, input: { lo
   if (!assigned && !auth.isSuperAdmin && !auth.permissions.includes("shoots.edit")) {
     throw new AppError(403, "FORBIDDEN", "Only the assigned cinematographer can file this report.");
   }
+  await assertWorkerPresent(auth, Boolean(assigned), "shoots.edit");
   if (!["scheduled", "in_progress"].includes(shoot.status)) throw new AppError(409, "CONFLICT", "This shoot is already handed to editing.");
   if (shoot.status === "scheduled") {
     shoot.status = "in_progress";
@@ -188,6 +209,7 @@ export async function submitShoot(auth: AuthContext, id: string, input: { usable
   if (!assigned && !auth.isSuperAdmin && !auth.permissions.includes("shoots.edit")) {
     throw new AppError(403, "FORBIDDEN", "Only the assigned cinematographer can submit this shoot.");
   }
+  await assertWorkerPresent(auth, Boolean(assigned), "shoots.edit");
   if (existing.outputsRegistered) throw new AppError(409, "CONFLICT", "Outputs were already registered for this shoot.");
   if (!["scheduled", "in_progress"].includes(existing.status)) throw new AppError(409, "CONFLICT", "This shoot can no longer be submitted.");
 
@@ -215,17 +237,27 @@ export async function submitShoot(auth: AuthContext, id: string, input: { usable
       if (!reshoot) throw new AppError(409, "CONFLICT", "The linked reshoot could not be found.");
       await Deliverable.updateOne(
         { _id: reshoot.deliverableId },
-        { $push: { sourceReferences: { $each: input.sourceReferences ?? [] } } },
+        { $set: { status: "available", assignedEditorId: null }, $push: { sourceReferences: { $each: input.sourceReferences ?? [] } } },
         sessionOpts(session),
       );
       const task = await EditingTask.findOne({ deliverableId: reshoot.deliverableId }).session(session);
-      if (task && ["rework", "on_hold", "available", "approved", "submitted"].includes(task.status)) {
+      if (task) {
         task.status = "available";
         task.claimedBy = undefined;
         task.holdReason = undefined;
+        task.submittedAt = undefined;
+        task.completedAt = undefined;
         task.lockVersion += 1;
         await task.save(sessionOpts(session));
-        await Deliverable.updateOne({ _id: reshoot.deliverableId }, { status: "available", assignedEditorId: null }, sessionOpts(session));
+      } else {
+        await EditingTask.create([{
+          deliverableId: reshoot.deliverableId,
+          clientId: shoot.clientId,
+          projectId: shoot.projectId,
+          shootId: shoot._id,
+          status: "available",
+          priority: shoot.priority || "normal",
+        }], sessionOpts(session));
       }
       reshoot.attemptNumber += 1;
       await reshoot.save(sessionOpts(session));
@@ -267,10 +299,14 @@ export async function submitShoot(auth: AuthContext, id: string, input: { usable
   });
 
   const editors = await recipientIds("editing.claim", String(existing.clientId));
-  if (!existing.reshootRequestId) {
-    await notify(editors, { type: "editing.available", title: "Editing tasks are available", body: `${result.deliverables.length} output${result.deliverables.length === 1 ? "" : "s"} from ${existing.shootCode}.`, entityType: "shoot", entityId: id });
-  }
-  if (!existing.reshootRequestId) await advanceProject(existing.projectId, "in_post");
+  await notify(editors, {
+    type: "editing.available",
+    title: existing.reshootRequestId ? "Reshoot is back in editing" : "Editing tasks are available",
+    body: existing.reshootRequestId ? `${existing.shootCode} rework is ready to edit.` : `${result.deliverables.length} output${result.deliverables.length === 1 ? "" : "s"} from ${existing.shootCode}.`,
+    entityType: "shoot",
+    entityId: id,
+  });
+  await advanceProject(existing.projectId, "in_post");
   await activity({
     clientId: existing.clientId,
     projectId: existing.projectId,
@@ -282,6 +318,7 @@ export async function submitShoot(auth: AuthContext, id: string, input: { usable
 }
 
 export async function listDeliverables(auth: AuthContext, query: Record<string, unknown>) {
+  if (query.billableStatus === "eligible") await syncInvoicedDeliverables();
   const { page, limit, skip } = pageParams(query);
   const filter: Record<string, unknown> = { ...scopeFilter(auth) };
   if (query.status) filter.status = query.status;
@@ -326,7 +363,14 @@ export async function listQueue(auth: AuthContext, query: Record<string, unknown
   const filter: Record<string, unknown> = { ...scopeFilter(auth) };
   if (typeof query.status === "string" && query.status) filter.status = query.status;
   if (query.mine === "1") filter.claimedBy = auth.userId;
-  const tasks = await EditingTask.find(filter).sort({ priority: -1, createdAt: 1 }).lean() as any;
+  const tasks = await EditingTask.find(filter).sort({ priority: -1, createdAt: 1 }).lean() as any[];
+  for (const task of tasks) {
+    if (task.status !== "rework" || !task.claimedBy) continue;
+    await EditingTask.updateOne({ _id: task._id, status: "rework" }, { $set: { status: "in_progress", holdReason: task.holdReason || "Sent back for rework." } });
+    await Deliverable.updateOne({ _id: task.deliverableId }, { $set: { status: "in_progress", assignedEditorId: task.claimedBy } });
+    task.status = "in_progress";
+    task.holdReason = task.holdReason || "Sent back for rework.";
+  }
   const deliverables = await Deliverable.find({ _id: { $in: tasks.map((task) => task.deliverableId) } }).lean() as any;
   const byId = new Map<string, any>(deliverables.map((item: any) => [String(item._id), item]));
   const clients = await Client.find({ _id: { $in: deliverables.map((item) => item.clientId) } }).select("name").lean() as any;
@@ -355,6 +399,7 @@ export async function listQueue(auth: AuthContext, query: Record<string, unknown
 }
 
 export async function claimTask(auth: AuthContext, taskId: string) {
+  await assertPunchedIn(auth);
   const current = await EditingTask.findById(taskId);
   if (!current) throw new AppError(404, "NOT_FOUND", "Task not found.");
   assertClientAccess(auth, current.clientId, current.projectId);
@@ -371,6 +416,7 @@ export async function claimTask(auth: AuthContext, taskId: string) {
 }
 
 export async function startTask(auth: AuthContext, taskId: string) {
+  await assertPunchedIn(auth);
   const task = await mutateTask({ _id: taskId, status: "claimed", claimedBy: auth.userId }, { $set: { status: "in_progress", startedAt: new Date() } });
   await Deliverable.updateOne({ _id: task.deliverableId }, { status: "in_progress" });
   await TaskHistory.create({ taskId, deliverableId: task.deliverableId, action: "started", actorId: auth.userId, toUserId: auth.userId });
@@ -378,6 +424,7 @@ export async function startTask(auth: AuthContext, taskId: string) {
 }
 
 export async function logTaskProgress(auth: AuthContext, taskId: string, input: { hoursSpent: number; outcome: string }) {
+  await assertPunchedIn(auth);
   const task = await EditingTask.findOne({ _id: taskId, claimedBy: auth.userId, status: { $in: ["claimed", "in_progress"] } });
   if (!task) throw new AppError(409, "CONFLICT", "Only the editor who holds this cut can log progress.");
   task.hoursSpent = input.hoursSpent;
@@ -395,6 +442,7 @@ export async function logTaskProgress(auth: AuthContext, taskId: string, input: 
 }
 
 export async function holdTask(auth: AuthContext, taskId: string, reason: string) {
+  await assertPunchedIn(auth);
   if (!reason.trim()) throw new AppError(400, "VALIDATION", "A hold needs a reason.");
   const task = await mutateTask({ _id: taskId, claimedBy: auth.userId, status: { $in: ["claimed", "in_progress"] } }, { $set: { status: "on_hold", holdReason: reason.trim() } });
   await Deliverable.updateOne({ _id: task.deliverableId }, { status: "on_hold" });
@@ -404,6 +452,7 @@ export async function holdTask(auth: AuthContext, taskId: string, reason: string
 }
 
 export async function resumeTask(auth: AuthContext, taskId: string) {
+  await assertPunchedIn(auth);
   const task = await mutateTask({ _id: taskId, claimedBy: auth.userId, status: { $in: ["on_hold", "rework"] } }, { $set: { status: "in_progress", holdReason: null, startedAt: new Date() } });
   await Deliverable.updateOne({ _id: task.deliverableId }, { status: "in_progress" });
   await TaskHistory.create({ taskId, deliverableId: task.deliverableId, action: "resumed", actorId: auth.userId });
@@ -411,6 +460,7 @@ export async function resumeTask(auth: AuthContext, taskId: string) {
 }
 
 export async function releaseTask(auth: AuthContext, taskId: string) {
+  await assertPunchedIn(auth);
   const task = await mutateTask({ _id: taskId, claimedBy: auth.userId, status: { $in: ["claimed", "in_progress", "on_hold"] } }, { $set: { status: "available", claimedBy: null, holdReason: null } });
   await Deliverable.updateOne({ _id: task.deliverableId }, { status: "available", assignedEditorId: null });
   await TaskHistory.create({ taskId, deliverableId: task.deliverableId, action: "released", fromUserId: auth.userId, actorId: auth.userId });
@@ -418,10 +468,11 @@ export async function releaseTask(auth: AuthContext, taskId: string) {
 }
 
 export async function submitTask(auth: AuthContext, taskId: string, input: { notes?: string; hoursSpent?: number; exportReferences?: Ref[] }) {
+  await assertPunchedIn(auth);
   const refs = (input.exportReferences ?? []).filter((item) => item.url);
   const task = await mutateTask(
     { _id: taskId, claimedBy: auth.userId, status: "in_progress" },
-    { $set: { status: "submitted", submittedAt: new Date(), ...(input.notes?.trim() ? { workNotes: input.notes.trim(), outcome: input.notes.trim() } : {}), ...(input.hoursSpent ? { hoursSpent: input.hoursSpent } : {}) } },
+    { $set: { status: "submitted", submittedAt: new Date(), holdReason: null, ...(input.notes?.trim() ? { workNotes: input.notes.trim(), outcome: input.notes.trim() } : {}), ...(input.hoursSpent ? { hoursSpent: input.hoursSpent } : {}) } },
   );
   await Deliverable.updateOne({ _id: task.deliverableId }, { status: "submitted", ...(refs.length ? { exportReferences: refs } : {}) });
   await TaskHistory.create({ taskId, deliverableId: task.deliverableId, action: "submitted", actorId: auth.userId });
@@ -444,11 +495,11 @@ export async function reassignTask(auth: AuthContext, taskId: string, toUserId: 
   const previous = current.claimedBy ? String(current.claimedBy) : undefined;
   const task = await EditingTask.findOneAndUpdate(
     { _id: taskId, lockVersion: current.lockVersion, status: current.status },
-    { $set: { claimedBy: toUserId, status: "claimed", claimedAt: new Date(), holdReason: null }, $inc: { lockVersion: 1 } },
+    { $set: { claimedBy: toUserId, status: "in_progress", claimedAt: new Date(), startedAt: new Date(), holdReason: reason.trim() }, $inc: { lockVersion: 1 } },
     { new: true },
   );
   if (!task) throw new AppError(409, "CONFLICT", "The task changed before it could be reassigned.");
-  await Deliverable.updateOne({ _id: task.deliverableId }, { status: "claimed", assignedEditorId: toUserId });
+  await Deliverable.updateOne({ _id: task.deliverableId }, { status: "in_progress", assignedEditorId: toUserId });
   await TaskHistory.create({ taskId, deliverableId: task.deliverableId, action: "reassigned", fromUserId: previous, toUserId, actorId: auth.userId, reason: reason.trim() });
   await notify([previous, toUserId], { type: "editing.reassigned", title: "Editing task reassigned", body: reason.trim(), entityType: "deliverable", entityId: String(task.deliverableId) });
   await audit({ actorId: auth.userId, action: "editing.reassigned", entityType: "editing_task", entityId: taskId, before: { claimedBy: previous }, after: { claimedBy: toUserId, reason } });
@@ -504,13 +555,17 @@ export async function reviewDeliverable(auth: AuthContext, deliverableId: string
     }
     await notify([task.claimedBy ? String(task.claimedBy) : undefined], { type: "editing.approved", title: "Edit approved", body: deliverable.title, entityType: "deliverable", entityId: deliverableId });
   } else {
+    if (!task.claimedBy) throw new AppError(409, "CONFLICT", "This edit has no editor to send the rework to.");
     deliverable.revisionCount += 1;
     deliverable.approvalStatus = "rejected";
-    deliverable.status = "rework";
-    task.status = "rework";
+    deliverable.status = "in_progress";
+    deliverable.assignedEditorId = task.claimedBy;
+    task.status = "in_progress";
+    task.holdReason = input.feedback?.trim() || "Sent back for rework.";
+    task.startedAt = task.startedAt ?? new Date();
     await task.save();
     await deliverable.save();
-    await notify([task.claimedBy ? String(task.claimedBy) : undefined], { type: "editing.rework", title: "Rework requested", body: input.feedback ?? "", entityType: "deliverable", entityId: deliverableId });
+    await notify([String(task.claimedBy)], { type: "editing.rework", title: "Rework is back on your queue", body: task.holdReason, entityType: "deliverable", entityId: deliverableId });
   }
   await TaskHistory.create({ taskId: task._id, deliverableId, action: input.decision, actorId: auth.userId, reason: input.feedback });
   await activity({ clientId: deliverable.clientId, projectId: deliverable.projectId, deliverableId, actorId: auth.userId, verb: `review.${input.decision}`, summary: input.decision === "approved" ? "Internal review approved this deliverable." : `Rework requested. Revision ${deliverable.revisionCount}.` });
@@ -534,10 +589,64 @@ export async function clientApprove(auth: AuthContext, deliverableId: string, fe
   return getDeliverable(auth, deliverableId);
 }
 
+async function openReshootShoot(reshoot: any) {
+  if (!reshoot) return null;
+  if (reshoot.resultingShootId) {
+    const existing = await Shoot.findById(reshoot.resultingShootId);
+    if (existing) return existing;
+  }
+  const [original, deliverable] = await Promise.all([
+    Shoot.findById(reshoot.originalShootId).lean() as any,
+    Deliverable.findById(reshoot.deliverableId).lean() as any,
+  ]);
+  const cinematographerId = String(reshoot.assignedCinematographerId || original?.cinematographerId || "");
+  if (!cinematographerId) throw new AppError(409, "CONFLICT", "The original shoot has no cinematographer, so this reshoot cannot be logged.");
+  const scheduledDate = typeof reshoot.scheduledDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(reshoot.scheduledDate)
+    ? reshoot.scheduledDate
+    : businessDateKey(new Date(), await studioTimezone());
+  const title = deliverable?.title ? `${deliverable.deliverableCode} · ${deliverable.title}` : reshoot.reshootCode;
+  const shoot = await Shoot.create({
+    shootCode: await nextCode("shoot", "GY-S"),
+    clientId: reshoot.clientId,
+    projectId: reshoot.projectId,
+    scheduledDate,
+    plannedStart: original?.plannedStart || "10:00",
+    plannedEnd: original?.plannedEnd || "18:00",
+    location: original?.location || "",
+    cinematographerId,
+    brief: `Reshoot ${reshoot.reshootCode} · ${title}. Log the rework, then send it back to editing.`,
+    plannedOutputCount: 1,
+    reshootRequestId: reshoot._id,
+    status: "scheduled",
+    priority: original?.priority || "normal",
+  });
+  reshoot.resultingShootId = shoot._id;
+  reshoot.assignedCinematographerId = cinematographerId;
+  reshoot.scheduledDate = scheduledDate;
+  await reshoot.save();
+  const cinematographer = await User.findOne({ employeeId: cinematographerId }).lean() as any;
+  await notify([cinematographer ? String(cinematographer._id) : undefined], {
+    type: "shoot.assigned",
+    title: "Reshoot to log",
+    body: `${shoot.shootCode} · ${title}. Log the rework on Shoots, then send it back to editing.`,
+    entityType: "shoot",
+    entityId: String(shoot._id),
+  });
+  await activity({ clientId: reshoot.clientId, projectId: reshoot.projectId, deliverableId: reshoot.deliverableId, actorId: reshoot.requestedBy, verb: "reshoot.opened", summary: `${reshoot.reshootCode} is with the cinematographer as ${shoot.shootCode}.` });
+  return shoot;
+}
+
 export async function listReshoots(auth: AuthContext, query: Record<string, unknown>) {
   const filter: Record<string, unknown> = { ...scopeFilter(auth) };
   if (query.status) filter.approvalStatus = query.status;
-  return Reshoot.find(filter).sort({ createdAt: -1 }).lean() as any;
+  const rows = await Reshoot.find(filter).sort({ createdAt: -1 }).lean() as any[];
+  for (const row of rows) {
+    if (row.approvalStatus === "approved" && !row.resultingShootId) {
+      const opened = await openReshootShoot(await Reshoot.findById(row._id));
+      if (opened) row.resultingShootId = opened._id;
+    }
+  }
+  return rows;
 }
 
 export async function createReshoot(auth: AuthContext, input: { deliverableId: string; reason: string; notes?: string }) {
@@ -575,7 +684,8 @@ export async function decideReshoot(auth: AuthContext, id: string, input: { appr
     }
   }
   reshoot.communicationNote = input.communicationNote ?? "";
-  await reshoot.save();
+  if (input.approvalStatus === "approved") await openReshootShoot(reshoot);
+  else await reshoot.save();
   await audit({ actorId: auth.userId, action: "reshoot.decided", entityType: "reshoot", entityId: id, after: { approvalStatus: reshoot.approvalStatus, billableDecision: reshoot.billableDecision, chargePaise: reshoot.chargePaise } });
   return reshoot.toObject();
 }
@@ -610,9 +720,8 @@ export async function scheduleReshoot(auth: AuthContext, id: string, input: { sc
 
 export async function listPublishing(auth: AuthContext, query: Record<string, unknown>) {
   const filter: Record<string, unknown> = { ...scopeFilter(auth) };
-  if (query.status) filter.status = query.status;
   if (query.mine === "1") filter.assignedTo = auth.userId;
-  const tasks = await PublishingTask.find(filter).sort({ scheduledAt: 1, createdAt: -1 }).lean() as any;
+  const tasks = await PublishingTask.find(filter).lean() as any;
   const deliverables = await Deliverable.find({ _id: { $in: tasks.map((task) => task.deliverableId) } }).lean() as any;
   const byId = new Map<string, any>(deliverables.map((item: any) => [String(item._id), item]));
   const clients = await Client.find({ _id: { $in: tasks.map((task) => task.clientId) } }).select("name").lean() as any;
@@ -622,11 +731,15 @@ export async function listPublishing(auth: AuthContext, query: Record<string, un
   const projectName = new Map(projects.map((item) => [String(item._id), item.name]));
   const projectCode = new Map(projects.map((item) => [String(item._id), item.projectCode]));
   const editByDeliverable = new Map<string, any>(edits.map((item: any) => [String(item.deliverableId), item]));
-  return tasks.map((task) => {
+  const rows = tasks.map((task) => {
     const deliverable = byId.get(String(task.deliverableId));
     const edit = editByDeliverable.get(String(task.deliverableId));
+    const readings = Array.isArray(task.readings) ? task.readings.slice(-12).reverse() : [];
     return {
       ...task,
+      viewCount: Number(task.viewCount ?? 0),
+      likeCount: Number(task.likeCount ?? 0),
+      readings,
       clientName: clientName.get(String(task.clientId)) ?? "",
       projectName: projectName.get(String(task.projectId)) ?? "",
       projectCode: projectCode.get(String(task.projectId)) ?? "",
@@ -643,6 +756,66 @@ export async function listPublishing(auth: AuthContext, query: Record<string, un
       hoursSpent: edit?.hoursSpent ?? 0,
     };
   });
+  const summary = {
+    total: rows.length,
+    published: rows.filter((row) => row.status === "published").length,
+    tracked: rows.filter((row) => row.status === "published" && row.metricsUpdatedAt).length,
+  };
+  const needle = String(query.q ?? "").trim().toLowerCase();
+  let visible = rows;
+  if (query.status) visible = visible.filter((row) => row.status === String(query.status));
+  if (needle) {
+    visible = visible.filter((row) => [row.clientName, row.projectName, row.projectCode, row.platform, row.deliverable?.title, row.deliverable?.deliverableCode].join(" ").toLowerCase().includes(needle));
+  }
+  const reach = String(query.reach ?? "");
+  if (reach === "views" || reach === "likes") {
+    visible = visible.filter((row) => row.status === "published");
+    visible.sort((left, right) => {
+      const primary = reach === "views" ? Number(right.viewCount) - Number(left.viewCount) : Number(right.likeCount) - Number(left.likeCount);
+      if (primary) return primary;
+      return Number(right.viewCount) + Number(right.likeCount) - (Number(left.viewCount) + Number(left.likeCount));
+    });
+  } else if (reach === "untracked") {
+    visible = visible.filter((row) => row.status === "published" && !row.metricsUpdatedAt);
+  } else {
+    const stamp = (row: { publishedAt?: unknown; scheduledAt?: unknown; createdAt?: unknown }) => {
+      const time = new Date((row.publishedAt ?? row.scheduledAt ?? row.createdAt ?? 0) as string).getTime();
+      return Number.isFinite(time) ? time : 0;
+    };
+    visible.sort((left, right) => stamp(right) - stamp(left));
+  }
+  if (query.page == null || query.page === "") return visible;
+  const { page, limit, skip } = pageParams(query);
+  return { items: visible.slice(skip, skip + limit), total: visible.length, page, pageSize: limit, summary };
+}
+
+export async function recordReach(auth: AuthContext, id: string, input: { views: number; likes: number; recordedOn?: string; note?: string }) {
+  if (!Number.isInteger(input.views) || input.views < 0 || !Number.isInteger(input.likes) || input.likes < 0) {
+    throw new AppError(400, "VALIDATION", "Views and likes need whole numbers, zero or more.");
+  }
+  const recordedOn = input.recordedOn ?? "";
+  if (recordedOn && !/^\d{4}-\d{2}-\d{2}$/.test(recordedOn)) throw new AppError(400, "VALIDATION", "Use a date like 2026-10-17.");
+  const task = await PublishingTask.findById(id);
+  if (!task) throw new AppError(404, "NOT_FOUND", "Publishing task not found.");
+  assertClientAccess(auth, task.clientId, task.projectId);
+  if (task.status !== "published") throw new AppError(409, "CONFLICT", "Publish the post before recording views and likes.");
+  const day = recordedOn || businessDateKey(new Date(), await studioTimezone());
+  const reading = {
+    views: input.views,
+    likes: input.likes,
+    recordedOn: day,
+    note: (input.note ?? "").trim().slice(0, 160),
+    recordedAt: new Date(),
+    recordedBy: auth.userId,
+  };
+  const prior = Array.isArray(task.readings) ? task.readings : [];
+  task.readings = [...prior, reading].slice(-200);
+  task.viewCount = input.views;
+  task.likeCount = input.likes;
+  task.metricsUpdatedAt = reading.recordedAt;
+  await task.save();
+  await activity({ clientId: task.clientId, projectId: task.projectId, deliverableId: task.deliverableId, actorId: auth.userId, verb: "publishing.reach", summary: `Reach updated to ${input.views} views and ${input.likes} likes on ${day}.` });
+  return task.toObject();
 }
 
 export async function schedulePost(auth: AuthContext, id: string, input: { scheduledAt: string; caption?: string; notes?: string; assignedTo?: string }) {
@@ -675,6 +848,7 @@ export async function publishPost(auth: AuthContext, id: string, input: { publis
   if (!task) throw new AppError(404, "NOT_FOUND", "Publishing task not found.");
   assertClientAccess(auth, task.clientId, task.projectId);
   if (task.status === "published") throw new AppError(409, "CONFLICT", "This post is already recorded as published.");
+  await assertPunchedIn(auth);
   const aspectRatio = input.aspectRatio?.trim() ?? "";
   task.status = "published";
   task.platform = platform;
@@ -699,6 +873,7 @@ export async function failPost(auth: AuthContext, id: string, reason: string) {
   if (!task) throw new AppError(404, "NOT_FOUND", "Publishing task not found.");
   assertClientAccess(auth, task.clientId, task.projectId);
   if (task.status === "published") throw new AppError(409, "CONFLICT", "A published post cannot be marked failed.");
+  await assertPunchedIn(auth);
   task.status = "failed";
   task.failureReason = reason.trim();
   await task.save();

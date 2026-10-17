@@ -132,8 +132,8 @@ export function ReportsPage() {
   const clientName = new Map((clients.data ?? []).map((client) => [client.id, client.name]));
 
   return (
-    <div>
-      <PageHeader eyebrow="Reports" title="Studio report" text="Income is money collected. Expenses count only after a super admin approves them. Payroll is the net pay for each month the dates touch." actions={
+    <div className="report-page">
+      <PageHeader eyebrow="Reports" title="Studio report" text="Income is money collected. Expenses count only after final approval. Payroll is the net pay for each month the dates touch." actions={
         <>
           <Button size="sm" variant="ghost" onClick={() => { const range = monthRange(zone); setFrom(range.from); setTo(range.to); }}>This month</Button>
           <Button size="sm" variant="ghost" onClick={() => { const range = lastMonthRange(todayKey(zone)); setFrom(range.from); setTo(range.to); }}>Last month</Button>
@@ -143,9 +143,10 @@ export function ReportsPage() {
           <Button size="sm" variant="ghost" onClick={() => window.print()}>Print</Button>
         </>
       } />
+      <p className="print-only mb-4 text-sm">{from} to {to}</p>
       {expenses.isError ? <Notice tone="danger">{errorMessage(expenses.error)}</Notice> : null}
       {expenses.isLoading ? <LoadingRows /> : null}
-      <section className="mb-6 grid border border-line bg-white sm:grid-cols-5">
+      <section className="report-metrics mb-6 grid border border-line bg-white sm:grid-cols-5">
         {[
           ["Invoiced", invoiced],
           ["Collected", collected],
@@ -164,7 +165,7 @@ export function ReportsPage() {
         <h2 className="border-b border-line px-4 py-3 font-medium">By month</h2>
         {view.byMonth.some((row) => row.invoicedPaise || row.collectedPaise || row.expensesPaise || row.payrollPaise) ? (
           <>
-            <div className="h-72 min-w-0 overflow-hidden px-1 py-4 sm:px-2">
+            <div className="report-chart h-72 min-w-0 overflow-hidden px-1 py-4 sm:px-2">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={view.byMonth} barSize={14} barGap={4} margin={{ top: 8, right: 12, left: 4, bottom: 0 }}>
                   <CartesianGrid vertical={false} stroke="#E6E3DC" />

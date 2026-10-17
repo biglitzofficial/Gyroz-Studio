@@ -1,6 +1,7 @@
 import { env, logger } from "./config";
 import { connectDb } from "./db";
-import { Employee, Role, Settings, User } from "./models";
+import { businessDateKey } from "./domain/dates";
+import { Attendance, Employee, Role, Settings, User } from "./models";
 import { loadAuth, type AuthContext } from "./auth";
 import { bootstrap } from "./services/identity";
 import { createClient, createProject } from "./services/crm";
@@ -10,6 +11,20 @@ import { approveInvoice, issueInvoice, recordPayment, saveInvoice, submitInvoice
 import { EditingTask } from "./models";
 
 const DEMO_PASSWORD = "GyrozDemo!2026";
+
+async function punchOpen(employeeId: unknown) {
+  if (!employeeId) return;
+  const dateKey = businessDateKey(new Date(), "Asia/Kolkata");
+  const existing = await Attendance.findOne({ employeeId, dateKey });
+  if (existing?.checkInAt && !existing.checkOutAt) return;
+  if (existing) {
+    existing.checkInAt = existing.checkInAt ?? new Date();
+    existing.checkOutAt = undefined;
+    await existing.save();
+    return;
+  }
+  await Attendance.create({ employeeId, dateKey, checkInAt: new Date(), checkInSource: "correction" });
+}
 
 async function authFor(email: string): Promise<AuthContext> {
   const user = await User.findOne({ email });
@@ -73,6 +88,7 @@ export async function seedDemo() {
   const project = await createProject(director, { clientId: String((client as { id: string }).id), name: "Monsoon Lookbook", description: "Four promotional films.", serviceType: "promotional video", priority: "high", budgetPaise: 800_000 });
   const shoot = await createShoot(director, { clientId: project.clientId, projectId: project._id, scheduledDate: new Date().toISOString().slice(0, 10), location: "Mattancherry", cinematographerId: arjun?._id, brief: "Four hero films.", plannedOutputCount: 4 });
   const cinematographer = await authFor("arjun@gyroz.studio");
+  await punchOpen(cinematographer.employeeId);
   await startShoot(cinematographer, String(shoot._id));
   await submitShoot(cinematographer, String(shoot._id), {
     usableFootageCount: 4,
@@ -80,6 +96,7 @@ export async function seedDemo() {
   });
   const tasks = await EditingTask.find({ shootId: shoot._id }).sort({ createdAt: 1 });
   const kabir = await authFor("kabir@gyroz.studio");
+  await punchOpen(kabir.employeeId);
   await claimTask(kabir, String(tasks[0]._id));
   await startTask(kabir, String(tasks[0]._id));
   await holdTask(kabir, String(tasks[0]._id), "Waiting on a missing insert.");

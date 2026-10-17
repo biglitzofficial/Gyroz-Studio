@@ -62,12 +62,12 @@ export async function userIdsForSystemKey(systemKey: "admin" | "super_admin") {
 }
 
 export async function recipientIds(permission: string, clientId?: string) {
-  const roles = await Role.find({ $or: [{ systemKey: "super_admin" }, { permissions: permission }] }).select("_id systemKey").lean() as any;
+  const roles = await Role.find({ $or: [{ systemKey: { $in: ["super_admin", "admin"] } }, { permissions: permission }] }).select("_id systemKey").lean() as any;
   const users = await User.find({ status: "active", roleId: { $in: roles.map((role) => role._id) } }).select("_id roleId scopeClientIds").lean() as any;
   return users
     .filter((user) => {
       const role = roles.find((item) => String(item._id) === String(user.roleId));
-      if (role?.systemKey === "super_admin") return true;
+      if (role?.systemKey === "super_admin" || role?.systemKey === "admin") return true;
       if (!clientId || !user.scopeClientIds?.length) return true;
       return user.scopeClientIds.some((id: unknown) => String(id) === clientId);
     })

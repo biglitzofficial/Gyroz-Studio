@@ -17,10 +17,22 @@ export function createApp() {
   app.disable("x-powered-by");
   app.set("trust proxy", 1);
   const httpsSite = env.clientOrigin.startsWith("https://");
+  const googleMaps = ["https://maps.googleapis.com", "https://maps.gstatic.com", "https://*.googleapis.com", "https://*.gstatic.com"];
   app.use(helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
     strictTransportSecurity: httpsSite ? undefined : false,
-    contentSecurityPolicy: httpsSite ? undefined : { useDefaults: true, directives: { upgradeInsecureRequests: null } },
+    contentSecurityPolicy: {
+      useDefaults: true,
+      directives: {
+        ...(httpsSite ? {} : { upgradeInsecureRequests: null }),
+        scriptSrc: ["'self'", "https://maps.googleapis.com", "https://maps.gstatic.com"],
+        scriptSrcElem: ["'self'", "https://maps.googleapis.com", "https://maps.gstatic.com"],
+        imgSrc: ["'self'", "data:", "blob:", ...googleMaps, "https://*.google.com", "https://*.googleusercontent.com"],
+        connectSrc: ["'self'", ...googleMaps],
+        workerSrc: ["'self'", "blob:"],
+        frameSrc: ["'self'", "https://maps.googleapis.com", "https://www.google.com"],
+      },
+    },
   }));
   const allowedOrigins = new Set([env.clientOrigin, "http://localhost", "https://localhost", "capacitor://localhost", "http://localhost:5173"]);
   app.use(cors({

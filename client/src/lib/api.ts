@@ -1,17 +1,12 @@
 import axios, { type AxiosError } from "axios";
-import { isApp, readRefresh, saveStudioAddress, studioAddress, writeRefresh } from "./studio";
+import { isApp, readRefresh, saveStudioAddress, STUDIO_URL, writeRefresh } from "./studio";
 
-export const api = axios.create({ baseURL: "/api/v1", withCredentials: true });
+export const api = axios.create({ baseURL: isApp() ? `${STUDIO_URL}/api/v1` : "/api/v1", withCredentials: true });
 
 export async function loadStudio() {
   if (!isApp()) return;
-  const saved = await studioAddress();
-  if (saved) api.defaults.baseURL = `${saved.replace(/\/$/, "")}/api/v1`;
-}
-
-export async function useStudio(origin: string) {
-  const base = await saveStudioAddress(origin);
-  api.defaults.baseURL = `${base}/api/v1`;
+  await saveStudioAddress(STUDIO_URL);
+  api.defaults.baseURL = `${STUDIO_URL}/api/v1`;
 }
 
 let accessToken: string | null = null;
@@ -36,6 +31,10 @@ api.interceptors.response.use((response) => {
   if (isApp() && typeof refresh === "string") void writeRefresh(refresh);
   return response;
 });
+
+export async function refreshAccessToken() {
+  return refreshAccess();
+}
 
 async function refreshAccess() {
   if (!refreshing) {

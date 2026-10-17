@@ -460,6 +460,20 @@ const publishingSchema = new Schema(
     publishedAt: Date,
     proofAssetId: { type: Schema.Types.ObjectId },
     failureReason: String,
+    viewCount: { type: Number, default: 0 },
+    likeCount: { type: Number, default: 0 },
+    metricsUpdatedAt: Date,
+    readings: {
+      type: [{
+        views: { type: Number, required: true },
+        likes: { type: Number, required: true },
+        recordedOn: { type: String, required: true },
+        note: { type: String, default: "" },
+        recordedAt: Date,
+        recordedBy: { type: Schema.Types.ObjectId },
+      }],
+      default: [],
+    },
   },
   opts,
 );
@@ -646,6 +660,41 @@ const settingsSchema = new Schema(
   opts,
 );
 
+const equipmentSchema = new Schema(
+  {
+    assetCode: { type: String, required: true, unique: true },
+    name: { type: String, required: true },
+    category: { type: String, required: true },
+    brand: { type: String, default: "" },
+    modelName: { type: String, default: "" },
+    serialNumber: { type: String, default: "" },
+    status: { type: String, default: "available" },
+    condition: { type: String, default: "good" },
+    location: { type: String, default: "" },
+    purchaseDate: { type: String, default: "" },
+    purchasePaise: { type: Number, default: 0 },
+    vendor: { type: String, default: "" },
+    warrantyUntil: { type: String, default: "" },
+    holderEmployeeId: { type: Schema.Types.ObjectId },
+    notes: { type: String, default: "" },
+    repairPaise: { type: Number, default: 0 },
+    servicePaise: { type: Number, default: 0 },
+    events: {
+      type: [{
+        kind: { type: String, required: true },
+        dateKey: { type: String, required: true },
+        note: { type: String, default: "" },
+        costPaise: { type: Number, default: 0 },
+        holderEmployeeId: { type: Schema.Types.ObjectId },
+        recordedAt: Date,
+        recordedBy: { type: Schema.Types.ObjectId },
+      }],
+      default: [],
+    },
+  },
+  opts,
+);
+
 const counterSchema = new Schema({ key: { type: String, required: true, unique: true }, seq: { type: Number, default: 0 } });
 
 export const Role = model("Role", roleSchema);
@@ -681,6 +730,7 @@ export const AuditLog = model("AuditLog", auditSchema);
 export const Activity = model("Activity", activitySchema);
 export const MediaAsset = model("MediaAsset", mediaSchema);
 export const Settings = model("Settings", settingsSchema);
+export const Equipment = model("Equipment", equipmentSchema);
 export const Counter = model("Counter", counterSchema);
 
 export type RoleRecord = { _id: string; [key: string]: any };

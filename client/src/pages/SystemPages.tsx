@@ -7,7 +7,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { api, errorMessage } from "@/lib/api";
 import { withWork } from "@/lib/feedback";
 import { rupeesToPaise } from "@/lib/format";
-import { useAuth } from "@/lib/auth";
+import { hasFullAccess, useAuth } from "@/lib/auth";
 import { Button, Empty, Field, LoadingRows, Notice, PageHeader, SaveAction, Status, TextInput } from "@/components/ui";
 
 export function RolesPage() {
@@ -81,14 +81,14 @@ export function RolesPage() {
             <form key={role.id} className="border border-line bg-white p-4" onChange={() => setPermDirty(true)} onSubmit={(event) => { event.preventDefault(); const data = new FormData(event.currentTarget); const permissions = catalog.data?.filter((item) => data.get(item.key) === "on").map((item) => item.key) ?? []; save.mutate({ id: role.id, name: role.name, permissions }); }}>
               <h2 className="font-medium">{role.name}</h2>
               <p className="mb-4 text-sm text-muted">{role.description}</p>
-              {role.systemKey === "super_admin" ? <p className="text-sm">This role always has full access and cannot be reduced.</p> : (
+              {hasFullAccess(role.systemKey) ? <p className="text-sm">This role always has full access and cannot be reduced.</p> : (
                 <div className="grid gap-2 sm:grid-cols-2">
                   {(catalog.data ?? []).map((item) => (
                     <label key={item.key} className="flex items-center gap-2 text-sm"><input type="checkbox" name={item.key} defaultChecked={role.permissions.includes(item.key)} /> {item.resource} · {item.action}</label>
                   ))}
                 </div>
               )}
-              {role.systemKey !== "super_admin" ? <SaveAction className="mt-4" changed={permDirty} stored pending={save.isPending} label="Save permissions" /> : null}
+              {hasFullAccess(role.systemKey) ? null : <SaveAction className="mt-4" changed={permDirty} stored pending={save.isPending} label="Save permissions" />}
               {save.isError ? <p className="mt-2 text-sm text-danger">{errorMessage(save.error)}</p> : null}
             </form>
           ) : null}
@@ -160,6 +160,7 @@ export function SettingsPage() {
       </div>
     </form>
     <DemoStudio />
+    <WipeStudio />
     </>
   );
 }
@@ -182,6 +183,67 @@ function DemoStudio() {
   );
 }
 
+function WipeStudio() {
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
+  const [step, setStep] = useState(0);
+  const [phrase, setPhrase] = useState("");
+  const [message, setMessage] = useState("");
+  const wipe = useMutation({
+    meta: { loading: "Deleting studio data", toast: "Studio data deleted." },
+    mutationFn: async () => api.post("/studio/wipe", { confirm: "DELETE" }),
+    onSuccess: () => {
+      setStep(0);
+      setPhrase("");
+      setMessage("All studio data was deleted. This login is still active.");
+      void queryClient.invalidateQueries();
+    },
+    onError: (error) => setMessage(errorMessage(error)),
+  });
+  if (!hasFullAccess(user?.role.systemKey)) return null;
+  function cancel() {
+    setStep(0);
+    setPhrase("");
+    setMessage("");
+  }
+  return (
+    <section className="mt-8 max-w-xl border border-[#efc6c2] bg-white p-4">
+      <h2 className="font-medium">Delete all data</h2>
+      <p className="mt-1 text-sm text-muted">Removes clients, projects, shoots, invoices, people, attendance, payroll, and uploaded files. This login stays.</p>
+      {step === 0 ? <Button className="mt-3" variant="danger" onClick={() => { setMessage(""); setStep(1); }}>Delete all data</Button> : null}
+      {step === 1 ? (
+        <div className="mt-3">
+          <p className="text-sm">First confirmation. Everything listed above will be removed from the studio.</p>
+          <div className="mt-3 flex gap-2">
+            <Button variant="danger" onClick={() => setStep(2)}>Continue</Button>
+            <Button variant="ghost" onClick={cancel}>Cancel</Button>
+          </div>
+        </div>
+      ) : null}
+      {step === 2 ? (
+        <div className="mt-3">
+          <p className="text-sm">Second confirmation. Type DELETE to continue.</p>
+          <Field label="Confirmation"><TextInput autoComplete="off" value={phrase} onChange={(event) => setPhrase(event.target.value)} placeholder="DELETE" /></Field>
+          <div className="mt-3 flex gap-2">
+            <Button variant="danger" disabled={phrase !== "DELETE"} onClick={() => setStep(3)}>Continue</Button>
+            <Button variant="ghost" onClick={cancel}>Cancel</Button>
+          </div>
+        </div>
+      ) : null}
+      {step === 3 ? (
+        <div className="mt-3">
+          <p className="text-sm">Third confirmation. The records are removed and cannot be brought back.</p>
+          <div className="mt-3 flex gap-2">
+            <Button variant="danger" disabled={wipe.isPending} onClick={() => wipe.mutate()}>{wipe.isPending ? "Deleting" : "Delete all data"}</Button>
+            <Button variant="ghost" onClick={cancel}>Cancel</Button>
+          </div>
+        </div>
+      ) : null}
+      {message ? <p className="mt-3 text-sm">{message}</p> : null}
+    </section>
+  );
+}
+
 export function AuditPage() {
   const query = useQuery({ queryKey: ["audit"], queryFn: async () => (await api.get("/audit")).data.data });
   return (
@@ -199,6 +261,7 @@ export function AuditPage() {
 }
 
 export function SearchPage() {
+  const { user } = useAuth();
   const [params] = useSearchParams();
   const q = params.get("q") ?? "";
   const query = useQuery({ queryKey: ["search", q], queryFn: async () => (await api.get("/search", { params: { q } })).data.data, enabled: q.length >= 2 });
@@ -212,6 +275,7 @@ export function SearchPage() {
           <Result title="Projects" rows={(query.data.projects ?? []).map((item: { _id: string; name: string }) => ({ to: `/projects/${item._id}`, label: item.name }))} />
           <Result title="Deliverables" rows={(query.data.deliverables ?? []).map((item: { _id: string; title: string; deliverableCode: string }) => ({ to: `/deliverables/${item._id}`, label: `${item.deliverableCode} ${item.title}` }))} />
           <Result title="Invoices" rows={(query.data.invoices ?? []).map((item: { _id: string; invoiceNumber: string }) => ({ to: `/invoices/${item._id}`, label: item.invoiceNumber }))} />
+          {hasFullAccess(user?.role.systemKey) ? <Result title="Assets" rows={(query.data.assets ?? []).map((item: { _id: string; assetCode: string; name: string }) => ({ to: `/assets/${item._id}`, label: `${item.assetCode} ${item.name}` }))} /> : null}
         </div>
       ) : <Empty title="Type at least two characters" text="Use the search in the top bar." />}
     </div>

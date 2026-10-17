@@ -14,18 +14,42 @@ import * as people from "./services/people";
 import * as insights from "./services/insights";
 import * as plans from "./services/plans";
 import * as storage from "./services/storage";
+import { wipeStudio } from "./services/wipe";
+import * as assets from "./services/assets";
+import { workReport } from "./services/work";
 import { getSettings, phoneApiHosts } from "./platform";
 import { PERMISSION_CATALOG } from "./domain/permissions";
 import { PROJECT_STATUSES, RESHOOT_REASONS } from "./domain/workflow";
 import { resolveLocalPath } from "./services/storage";
 import { toCsv } from "./platform";
 import { Invoice, Attendance, Employee } from "./models";
+import { subscribe } from "./live";
 
 const wrap = <T extends z.ZodRawShape>(body: T) => z.object({ body: z.object(body), query: z.object({}).passthrough(), params: z.object({}).passthrough() });
 
 export const api = Router();
 
 api.get("/health", (_req, res) => res.json(ok({ ok: true, service: "gyroz-studio" })));
+
+api.get("/live", requireAuth, (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.write(`: ${" ".repeat(2048)}\n\n`);
+  const unsubscribe = subscribe((event) => {
+    if (!res.writableEnded) res.write(`data: ${JSON.stringify(event)}\n\n`);
+  });
+  const beat = setInterval(() => {
+    if (!res.writableEnded) res.write(": ping\n\n");
+  }, 20000);
+  req.on("close", () => {
+    clearInterval(beat);
+    unsubscribe();
+  });
+});
 
 function forClient<T extends { refreshToken?: string }>(req: { get(name: string): string | undefined }, result: T) {
   if (req.get("x-gyroz-app") === "1") return result;
@@ -252,6 +276,11 @@ api.post("/publishing/:id/fail", requireAuth, requirePermission("publishing.publ
   const { body } = readInput(req, wrap({ reason: z.string().min(2) }));
   res.json(ok(await production.failPost(req.auth!, req.params.id, body.reason)));
 }));
+api.post("/publishing/:id/metrics", requireAuth, requirePermission("publishing.publish"), validate(wrap({ views: z.number().int().nonnegative().max(1_000_000_000), likes: z.number().int().nonnegative().max(1_000_000_000), recordedOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), note: z.string().trim().max(160).optional() })), asyncRoute(async (req, res) => {
+  const schema = wrap({ views: z.number().int().nonnegative().max(1_000_000_000), likes: z.number().int().nonnegative().max(1_000_000_000), recordedOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), note: z.string().trim().max(160).optional() });
+  const { body } = readInput(req, schema);
+  res.json(ok(await production.recordReach(req.auth!, req.params.id, body)));
+}));
 
 const line = z.object({ description: z.string().trim().min(2).max(160), quantity: z.number().int().min(1).max(999), unitPricePaise: z.number().int().nonnegative().max(100_000_000_00), discountPaise: z.number().int().nonnegative().max(100_000_000_00).default(0), sourceType: z.enum(["manual", "shoot", "deliverable", "reshoot", "retainer", "other"]).optional(), sourceId: z.string().optional(), serviceType: z.string().trim().max(40).optional() });
 const invoiceBody = { clientId: z.string(), projectId: z.string().optional(), dueDate: z.string().optional(), lineItems: z.array(line).min(1), discountPaise: z.number().int().nonnegative().optional(), taxRateBps: z.number().int().min(0).max(10000).optional(), internalNotes: z.string().optional(), clientNotes: z.string().optional() };
@@ -429,6 +458,10 @@ api.get("/analytics/production", requireAuth, requireAnyPermission("analytics.vi
 api.get("/analytics/performance", requireAuth, requirePermission("analytics.view"), asyncRoute(async (req, res) => {
   res.json(ok(await insights.performanceReport(req.auth!, String(req.query.from), String(req.query.to))));
 }));
+api.get("/work", requireAuth, asyncRoute(async (req, res) => {
+  const span = req.query.span === "week" || req.query.span === "month" ? req.query.span : "day";
+  res.json(ok(await workReport(req.auth!, { span, date: typeof req.query.date === "string" ? req.query.date : "", person: typeof req.query.person === "string" ? req.query.person : "" })));
+}));
 api.get("/search", requireAuth, requirePermission("search.view"), asyncRoute(async (req, res) => res.json(ok(await insights.searchRecords(req.auth!, String(req.query.q ?? ""))))));
 api.get("/notifications", requireAuth, asyncRoute(async (req, res) => res.json(ok(await insights.listNotifications(req.auth!)))));
 api.post("/notifications/:id/read", requireAuth, asyncRoute(async (req, res) => {
@@ -446,11 +479,19 @@ api.post("/dev/seed", requireAuth, asyncRoute(async (req, res) => {
   await seedDemo();
   res.json(ok({ seeded: true }));
 }));
+api.get("/maps/key", requireAuth, asyncRoute(async (req, res) => {
+  if (!req.auth?.isSuperAdmin) throw new AppError(403, "FORBIDDEN", "Only a super admin can open the office map.");
+  if (!env.googleMapsApiKey) throw new AppError(409, "CONFLICT", "Add a Google Maps API key to show the streets.");
+  res.json(ok({ key: env.googleMapsApiKey }));
+}));
 api.get("/settings", requireAuth, requirePermission("settings.manage"), asyncRoute(async (_req, res) => {
   const settings = await getSettings();
   res.json(ok({ ...settings.toObject(), phoneHosts: phoneApiHosts(env.port) }));
 }));
 api.put("/settings", requireAuth, requirePermission("settings.manage"), asyncRoute(async (req, res) => res.json(ok(await insights.updateSettings(req.auth!, req.body)))));
+api.post("/studio/wipe", requireAuth, validate(wrap({ confirm: z.literal("DELETE") })), asyncRoute(async (req, res) => {
+  res.json(ok(await wipeStudio(req.auth!)));
+}));
 
 api.get("/exports/invoices.csv", requireAuth, requirePermission("exports.create"), requirePermission("invoices.view"), asyncRoute(async (req, res) => {
   const rows = await Invoice.find(req.auth!.isSuperAdmin ? {} : {}).select("invoiceNumber status totalPaise paidPaise issueDate").lean() as any;
@@ -465,6 +506,36 @@ api.get("/exports/attendance.csv", requireAuth, requirePermission("exports.creat
   const csv = toCsv([["Employee", "Date", "Check in", "Check out", "Minutes", "Late"], ...rows.map((row) => [names.get(String(row.employeeId)) ?? "", row.dateKey, row.checkInAt?.toISOString() ?? "", row.checkOutAt?.toISOString() ?? "", row.minutes, row.late ? "yes" : "no"])]);
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.send(csv);
+}));
+
+const assetBody = {
+  name: z.string().trim().min(2).max(80),
+  category: z.enum(["camera", "lens", "lighting", "audio", "drone", "grip", "computer", "storage", "power", "vehicle", "other"]),
+  brand: z.string().trim().max(80).optional(),
+  modelName: z.string().trim().max(80).optional(),
+  serialNumber: z.string().trim().max(80).optional(),
+  condition: z.enum(["new", "good", "fair", "poor"]),
+  location: z.string().trim().max(120).optional(),
+  purchaseDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().or(z.literal("")),
+  purchasePaise: z.number().int().nonnegative().max(100_000_000_00).optional(),
+  vendor: z.string().trim().max(80).optional(),
+  warrantyUntil: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().or(z.literal("")),
+  notes: z.string().trim().max(500).optional(),
+};
+api.get("/assets", requireAuth, asyncRoute(async (req, res) => res.json(ok(await assets.listAssets(req.auth!, req.query as Record<string, unknown>)))));
+api.post("/assets", requireAuth, validate(wrap(assetBody)), asyncRoute(async (req, res) => {
+  const { body } = readInput(req, wrap(assetBody));
+  res.status(201).json(ok(await assets.createAsset(req.auth!, body)));
+}));
+api.get("/assets/:id", requireAuth, asyncRoute(async (req, res) => res.json(ok(await assets.getAsset(req.auth!, req.params.id)))));
+api.patch("/assets/:id", requireAuth, validate(wrap(assetBody)), asyncRoute(async (req, res) => {
+  const { body } = readInput(req, wrap(assetBody));
+  res.json(ok(await assets.updateAsset(req.auth!, req.params.id, body)));
+}));
+api.post("/assets/:id/events", requireAuth, validate(wrap({ kind: z.enum(["assigned", "returned", "damaged", "repair_sent", "repair_done", "service", "retired", "lost", "note"]), dateKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), note: z.string().trim().max(500).optional(), costPaise: z.number().int().nonnegative().max(100_000_000_00).optional(), holderEmployeeId: z.string().optional(), condition: z.enum(["new", "good", "fair", "poor"]).optional() })), asyncRoute(async (req, res) => {
+  const schema = wrap({ kind: z.enum(["assigned", "returned", "damaged", "repair_sent", "repair_done", "service", "retired", "lost", "note"]), dateKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), note: z.string().trim().max(500).optional(), costPaise: z.number().int().nonnegative().max(100_000_000_00).optional(), holderEmployeeId: z.string().optional(), condition: z.enum(["new", "good", "fair", "poor"]).optional() });
+  const { body } = readInput(req, schema);
+  res.json(ok(await assets.recordAssetEvent(req.auth!, req.params.id, body)));
 }));
 
 api.post("/media/intent", requireAuth, validate(wrap({ filename: z.string().min(1), contentType: z.string().min(3), size: z.number().int().positive(), ownerType: z.string().min(2), ownerId: z.string().optional(), kind: z.string().optional() })), asyncRoute(async (req, res) => {

@@ -21,6 +21,7 @@ const schema = z.object({
   BOOTSTRAP_NAME: z.string().default("Super Admin"),
   STORAGE_DRIVER: z.enum(["local", "s3"]).default("local"),
   UPLOAD_DIR: z.string().default("uploads"),
+  GOOGLE_MAPS_API_KEY: z.string().optional().default(""),
   S3_BUCKET: z.string().optional().default(""),
   S3_REGION: z.string().optional().default(""),
   S3_ENDPOINT: z.string().optional().default(""),
@@ -31,13 +32,23 @@ const schema = z.object({
 const parsed = schema.parse(process.env);
 
 const accountName = "gyroz-studio-firebase-adminsdk-fbsvc-2846b3b786.json";
-const firebaseServiceAccount = [parsed.FIREBASE_SERVICE_ACCOUNT, path.resolve(process.cwd(), accountName), path.resolve(process.cwd(), "..", accountName)]
-  .filter(Boolean)
-  .find((file) => fs.existsSync(file));
+const firebaseServiceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim() ?? "";
+const firebaseServiceAccount = firebaseServiceAccountJson
+  ? ""
+  : [parsed.FIREBASE_SERVICE_ACCOUNT, path.resolve(process.cwd(), accountName), path.resolve(process.cwd(), "..", accountName)]
+      .filter(Boolean)
+      .find((file) => fs.existsSync(file));
 
-if (!firebaseServiceAccount) {
-  throw new Error("Firebase service account was not found. Place the Gyroz Studio key in the project folder or set FIREBASE_SERVICE_ACCOUNT.");
+if (!firebaseServiceAccountJson && !firebaseServiceAccount) {
+  throw new Error("Firebase service account was not found. Place the Gyroz Studio key in the project folder or set FIREBASE_SERVICE_ACCOUNT_JSON.");
 }
+
+if (firebaseServiceAccountJson) {
+  JSON.parse(firebaseServiceAccountJson);
+}
+
+const railwayHost = (process.env.RAILWAY_PUBLIC_DOMAIN || "").replace(/^https?:\/\//, "");
+const clientOrigin = railwayHost && /^http:\/\/(localhost|127\.0\.0\.1)/.test(parsed.CLIENT_ORIGIN) ? `https://${railwayHost}` : parsed.CLIENT_ORIGIN;
 
 if (parsed.NODE_ENV === "production") {
   const missing = ["JWT_ACCESS_SECRET", "JWT_REFRESH_SECRET", "BOOTSTRAP_PASSWORD"].filter((key) => !process.env[key]);
@@ -51,11 +62,12 @@ export const env = {
   nodeEnv: parsed.NODE_ENV,
   port: parsed.PORT,
   firebaseServiceAccount,
+  firebaseServiceAccountJson,
   jwtAccessSecret: parsed.JWT_ACCESS_SECRET,
   jwtRefreshSecret: parsed.JWT_REFRESH_SECRET,
   accessTtlSeconds: 60 * 15,
   refreshTtlDays: 14,
-  clientOrigin: parsed.CLIENT_ORIGIN,
+  clientOrigin,
   businessTimezone: parsed.BUSINESS_TIMEZONE,
   currency: parsed.CURRENCY,
   bootstrapEmail: parsed.BOOTSTRAP_EMAIL.toLowerCase(),
@@ -63,6 +75,7 @@ export const env = {
   bootstrapName: parsed.BOOTSTRAP_NAME,
   storageDriver: parsed.STORAGE_DRIVER,
   uploadDir: parsed.UPLOAD_DIR,
+  googleMapsApiKey: parsed.GOOGLE_MAPS_API_KEY.trim(),
   s3: {
     bucket: parsed.S3_BUCKET,
     region: parsed.S3_REGION,

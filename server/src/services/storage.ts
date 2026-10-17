@@ -87,3 +87,9 @@ export async function accessUrl(auth: AuthContext, assetId: string) {
   const url = await getSignedUrl(client, new GetObjectCommand({ Bucket: env.s3.bucket, Key: asset.storageKey }), { expiresIn: 300 });
   return { url, filename: asset.filename, contentType: asset.contentType, actor: auth.userId };
 }
+
+export async function clearLocalUploads() {
+  const root = path.resolve(process.cwd(), env.uploadDir);
+  const entries = await fs.readdir(root).catch(() => [] as string[]);
+  await Promise.all(entries.map((name) => fs.rm(path.join(root, name), { recursive: true, force: true })));
+}

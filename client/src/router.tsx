@@ -11,9 +11,11 @@ import { CalendarPage } from "@/pages/CalendarPage";
 import { EditingPage, DeliverablePage, ReshootsPage, PublishingPage } from "@/pages/ProductionPages";
 import { InvoicesPage, InvoiceDetailPage, ExpensesPage, AnalyticsPage } from "@/pages/FinancePages";
 import { ReportsPage } from "@/pages/ReportsPage";
+import { WorkPage } from "@/pages/WorkPage";
 import { EmployeesPage, EmployeeDetailPage, AttendancePage, PayrollPage } from "@/pages/PeoplePages";
 import { HrmsPage } from "@/pages/HrmsPage";
 import { RolesPage, SettingsPage, AuditPage, SearchPage, NotificationsPage, ProfilePage, PasswordPage } from "@/pages/SystemPages";
+import { AssetDetailPage, AssetsPage } from "@/pages/AssetsPage";
 
 function Gate({ children }: { children: ReactNode }) {
   const { user, ready } = useAuth();
@@ -38,6 +40,8 @@ export const router = createBrowserRouter([
       { path: "projects", element: <ProjectsPage /> },
       { path: "projects/:id", element: <ProjectDetailPage /> },
       { path: "shoots", element: <ShootsPage /> },
+      { path: "assets", element: <AssetsPage /> },
+      { path: "assets/:id", element: <AssetDetailPage /> },
       { path: "calendar", element: <CalendarPage /> },
       { path: "editing", element: <EditingPage /> },
       { path: "deliverables/:id", element: <DeliverablePage /> },
@@ -48,6 +52,7 @@ export const router = createBrowserRouter([
       { path: "expenses", element: <ExpensesPage /> },
       { path: "analytics", element: <AnalyticsPage /> },
       { path: "reports", element: <ReportsPage /> },
+      { path: "work", element: <WorkPage /> },
       { path: "hrms", element: <HrmsPage /> },
       { path: "employees", element: <EmployeesPage /> },
       { path: "employees/:id", element: <EmployeeDetailPage /> },

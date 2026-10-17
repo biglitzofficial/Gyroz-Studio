@@ -64,12 +64,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     },
     can(permission: string) {
       if (!user) return false;
-      if (user.role.systemKey === "super_admin") return true;
+      if (hasFullAccess(user.role.systemKey)) return true;
       return user.role.permissions.includes(permission);
     },
   }), [user, ready]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+export function hasFullAccess(systemKey?: string | null) {
+  return systemKey === "super_admin" || systemKey === "admin";
 }
 
 export function useAuth() {
