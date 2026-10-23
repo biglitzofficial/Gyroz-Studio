@@ -498,7 +498,19 @@ export async function listAttendance(auth: AuthContext, query: Record<string, un
     if (typeof query.from === "string") (filter.dateKey as Record<string, string>).$gte = query.from;
     if (typeof query.to === "string") (filter.dateKey as Record<string, string>).$lte = query.to;
   }
-  return Attendance.find(filter).sort({ dateKey: -1 }).limit(200).lean() as any;
+  const rows = await Attendance.find(filter).sort({ dateKey: -1 }).limit(200).lean() as any[];
+  const people = rows.length
+    ? await Employee.find({ _id: { $in: rows.map((row) => row.employeeId) } }).select("firstName lastName employeeCode").lean() as any[]
+    : [];
+  const byId = new Map(people.map((person) => [String(person._id), person]));
+  return rows.map((row) => {
+    const person = byId.get(String(row.employeeId));
+    return {
+      ...row,
+      personName: person ? `${person.firstName} ${person.lastName}`.trim() : "",
+      employeeCode: person?.employeeCode ?? "",
+    };
+  });
 }
 
 export async function correctAttendance(auth: AuthContext, input: { employeeId: string; dateKey: string; checkInAt?: string; checkOutAt?: string; checkInTime?: string; checkOutTime?: string; reason: string }) {

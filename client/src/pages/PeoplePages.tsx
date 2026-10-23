@@ -163,6 +163,12 @@ function shiftMonth(anchor: string, delta: number) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
+function shiftDay(key: string, delta: number) {
+  const [year, month, day] = key.split("-").map(Number);
+  const date = new Date(year, month - 1, day + delta);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
 export function AttendancePage() {
   const { can, user } = useAuth();
   const staffCalendar = can("attendance.self") && !can("attendance.view") && !can("attendance.manage");
@@ -176,11 +182,14 @@ export function AttendancePage() {
   const stopScan = useRef<(() => void) | null>(null);
   const direction = useRef<"punch-in" | "punch-out">("punch-in");
   const today = todayKey(user?.studio?.businessTimezone ?? "Asia/Kolkata");
+  const [day, setDay] = useState(today);
   const queryClient = useQueryClient();
   const cells = monthCells(`${month}-01`);
+  const companyList = !staffCalendar;
+  const selectedDay = day && day <= today ? day : today;
   const rows = useQuery({
-    queryKey: ["attendance", staffCalendar ? cells[0].key : "", staffCalendar ? cells[41].key : ""],
-    queryFn: async () => (await api.get("/attendance", { params: staffCalendar ? { from: cells[0].key, to: cells[41].key } : {} })).data.data,
+    queryKey: ["attendance", companyList ? selectedDay : cells[0].key, companyList ? selectedDay : cells[41].key],
+    queryFn: async () => (await api.get("/attendance", { params: companyList ? { from: selectedDay, to: selectedDay } : { from: cells[0].key, to: cells[41].key } })).data.data as AttendanceRow[],
   });
   const todayRows = useQuery({
     queryKey: ["attendance", "today", today],
@@ -278,14 +287,27 @@ export function AttendancePage() {
       {message ? <p className="mb-3 text-sm">{message}</p> : null}
       {can("attendance.manage") ? <PendingDecisions /> : null}
       {staffCalendar ? <AttendanceCalendar month={month} onMonth={setMonth} punches={rows.data ?? []} onChanged={() => setMessage("Saved. It shows on your calendar.")} /> : null}
-      <div className="table-wrap"><table className="data"><thead><tr><th>Date</th><th>In</th><th>Out</th><th>Minutes</th><th>Mark</th></tr></thead><tbody>
-        {(rows.data ?? []).map((row: { _id: string; dateKey: string; checkInAt?: string; checkOutAt?: string; minutes: number; late?: boolean; earlyDeparture?: boolean; locationStatus?: string }) => {
+      {companyList ? (
+        <div className="mb-3 flex flex-wrap items-end gap-2">
+          <Field label="Date"><TextInput type="date" value={selectedDay} max={today} onChange={(event) => setDay(event.target.value && event.target.value <= today ? event.target.value : today)} /></Field>
+          <Button variant="ghost" onClick={() => setDay(shiftDay(selectedDay, -1))}>Previous day</Button>
+          <Button variant="ghost" disabled={selectedDay >= today} onClick={() => setDay(shiftDay(selectedDay, 1))}>Next day</Button>
+          {selectedDay !== today ? <Button variant="ghost" onClick={() => setDay(today)}>Today</Button> : null}
+        </div>
+      ) : null}
+      <div className="table-wrap"><table className="data"><thead><tr>{companyList ? <th>Name</th> : null}<th>Date</th><th>In</th><th>Out</th><th>Minutes</th><th>Mark</th></tr></thead><tbody>
+        {rows.isLoading ? <tr><td className="text-muted" colSpan={companyList ? 6 : 5}>Loading attendance…</td></tr> : null}
+        {(rows.data ?? []).map((row) => {
           const tone = !row.checkInAt ? "absent" : row.late || row.earlyDeparture ? "late" : "present";
           const mark = !row.checkInAt ? "Absent" : row.late ? "Late" : row.earlyDeparture ? "Left early" : "Present";
           return (
-            <tr key={row._id}><td>{row.dateKey}</td><td>{row.checkInAt ? new Date(row.checkInAt).toLocaleTimeString("en-IN") : "—"}</td><td>{row.checkOutAt ? new Date(row.checkOutAt).toLocaleTimeString("en-IN") : "—"}</td><td className="num">{row.minutes}</td><td><span className={`inline-block px-2 py-1 day-${tone}`}>{mark}{row.checkInAt && !row.checkOutAt ? " · still in" : ""}{row.locationStatus === "outside" ? " · outside office" : row.locationStatus === "inside" ? " · in office" : ""}</span></td></tr>
+            <tr key={row._id}>
+              {companyList ? <td>{row.personName || "—"}{row.employeeCode ? <div className="text-xs text-muted">{row.employeeCode}</div> : null}</td> : null}
+              <td>{row.dateKey}</td><td>{row.checkInAt ? new Date(row.checkInAt).toLocaleTimeString("en-IN") : "—"}</td><td>{row.checkOutAt ? new Date(row.checkOutAt).toLocaleTimeString("en-IN") : "—"}</td><td className="num">{row.minutes}</td><td><span className={`inline-block px-2 py-1 day-${tone}`}>{mark}{row.checkInAt && !row.checkOutAt ? " · still in" : ""}{row.locationStatus === "outside" ? " · outside office" : row.locationStatus === "inside" ? " · in office" : ""}</span></td>
+            </tr>
           );
         })}
+        {!rows.isLoading && !(rows.data ?? []).length ? <tr><td className="text-muted" colSpan={companyList ? 6 : 5}>No attendance on {companyList ? selectedDay : "this month"}.</td></tr> : null}
       </tbody></table></div>
     </div>
   );
@@ -415,6 +437,20 @@ function PendingDecisions() {
     </section>
   );
 }
+
+type AttendanceRow = {
+  _id: string;
+  dateKey: string;
+  employeeId?: string;
+  personName?: string;
+  employeeCode?: string;
+  checkInAt?: string;
+  checkOutAt?: string;
+  minutes: number;
+  late?: boolean;
+  earlyDeparture?: boolean;
+  locationStatus?: string;
+};
 
 type DayTone = "present" | "late" | "leave" | "pending" | "absent" | "off" | "";
 
